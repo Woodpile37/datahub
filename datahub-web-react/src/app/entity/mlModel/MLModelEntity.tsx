@@ -2,7 +2,7 @@ import * as React from 'react';
 import { CodeSandboxOutlined } from '@ant-design/icons';
 import { MlModel, EntityType, SearchResult, OwnershipType } from '../../../types.generated';
 import { Preview } from './preview/Preview';
-import { Entity, IconStyleType, PreviewType } from '../Entity';
+import { Entity, EntityCapabilityType, IconStyleType, PreviewType } from '../Entity';
 import { getDataForEntityType } from '../shared/containers/profile/utils';
 import { EntityProfile } from '../shared/containers/profile/EntityProfile';
 import { useGetMlModelQuery } from '../../../graphql/mlModel.generated';
@@ -10,7 +10,7 @@ import { GenericEntityProperties } from '../shared/types';
 import MLModelSummary from './profile/MLModelSummary';
 import MLModelGroupsTab from './profile/MLModelGroupsTab';
 import { SidebarTagsSection } from '../shared/containers/profile/sidebar/SidebarTagsSection';
-import { SidebarAboutSection } from '../shared/containers/profile/sidebar/SidebarAboutSection';
+import { SidebarAboutSection } from '../shared/containers/profile/sidebar/AboutSection/SidebarAboutSection';
 import { SidebarOwnerSection } from '../shared/containers/profile/sidebar/Ownership/SidebarOwnerSection';
 import { SidebarDomainSection } from '../shared/containers/profile/sidebar/Domain/SidebarDomainSection';
 import { PropertiesTab } from '../shared/tabs/Properties/PropertiesTab';
@@ -24,20 +24,20 @@ import { EntityMenuItems } from '../shared/EntityDropdown/EntityDropdown';
 export class MLModelEntity implements Entity<MlModel> {
     type: EntityType = EntityType.Mlmodel;
 
-    icon = (fontSize: number, styleType: IconStyleType) => {
+    icon = (fontSize: number, styleType: IconStyleType, color?: string) => {
         if (styleType === IconStyleType.TAB_VIEW) {
-            return <CodeSandboxOutlined style={{ fontSize }} />;
+            return <CodeSandboxOutlined style={{ fontSize, color }} />;
         }
 
         if (styleType === IconStyleType.HIGHLIGHT) {
-            return <CodeSandboxOutlined style={{ fontSize, color: '#9633b9' }} />;
+            return <CodeSandboxOutlined style={{ fontSize, color: color || '#9633b9' }} />;
         }
 
         return (
             <CodeSandboxOutlined
                 style={{
                     fontSize,
-                    color: '#BFBFBF',
+                    color: color || '#BFBFBF',
                 }}
             />
         );
@@ -57,8 +57,10 @@ export class MLModelEntity implements Entity<MlModel> {
 
     getCollectionName = () => 'ML Models';
 
-    getOverridePropertiesFromEntity = (_?: MlModel | null): GenericEntityProperties => {
-        return {};
+    getOverridePropertiesFromEntity = (mlModel?: MlModel | null): GenericEntityProperties => {
+        return {
+            externalUrl: mlModel?.properties?.externalUrl,
+        };
     };
 
     renderProfile = (urn: string) => (
@@ -68,7 +70,7 @@ export class MLModelEntity implements Entity<MlModel> {
             entityType={EntityType.Mlmodel}
             useEntityQuery={useGetMlModelQuery}
             getOverrideProperties={this.getOverridePropertiesFromEntity}
-            headerDropdownItems={new Set([EntityMenuItems.COPY_URL, EntityMenuItems.UPDATE_DEPRECATION])}
+            headerDropdownItems={new Set([EntityMenuItems.UPDATE_DEPRECATION])}
             tabs={[
                 {
                     name: 'Summary',
@@ -130,15 +132,26 @@ export class MLModelEntity implements Entity<MlModel> {
             name: entity.name,
             type: EntityType.Mlmodel,
             icon: entity.platform?.properties?.logoUrl || undefined,
-            platform: entity.platform?.name,
+            platform: entity.platform,
         };
     };
 
     displayName = (data: MlModel) => {
-        return data.name;
+        return data.name || data.urn;
     };
 
     getGenericEntityProperties = (mlModel: MlModel) => {
         return getDataForEntityType({ data: mlModel, entityType: this.type, getOverrideProperties: (data) => data });
+    };
+
+    supportedCapabilities = () => {
+        return new Set([
+            EntityCapabilityType.OWNERS,
+            EntityCapabilityType.GLOSSARY_TERMS,
+            EntityCapabilityType.TAGS,
+            EntityCapabilityType.DOMAINS,
+            EntityCapabilityType.DEPRECATION,
+            EntityCapabilityType.SOFT_DELETE,
+        ]);
     };
 }

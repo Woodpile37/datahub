@@ -10,7 +10,6 @@ from datahub.ingestion.graph.client import DatahubClientConfig, DataHubGraph
 # Imports for metadata model classes
 from datahub.metadata.schema_classes import (
     AuditStampClass,
-    ChangeTypeClass,
     EditableSchemaFieldInfoClass,
     EditableSchemaMetadataClass,
     GlossaryTermAssociationClass,
@@ -23,18 +22,15 @@ logging.basicConfig(level=logging.INFO)
 
 def get_simple_field_path_from_v2_field_path(field_path: str) -> str:
     """A helper function to extract simple . path notation from the v2 field path"""
-    if field_path.startswith("[version=2.0]"):
-        # this is a v2 field path
-        tokens = [
-            t
-            for t in field_path.split(".")
-            if not (t.startswith("[") or t.endswith("]"))
-        ]
-        path = ".".join(tokens)
-        return path
-    else:
+    if not field_path.startswith("[version=2.0]"):
         # not a v2, we assume this is a simple path
         return field_path
+        # this is a v2 field path
+    tokens = [
+        t for t in field_path.split(".") if not (t.startswith("[") or t.endswith("]"))
+    ]
+
+    return ".".join(tokens)
 
 
 # Inputs -> the column, dataset and the term to set
@@ -48,10 +44,8 @@ gms_endpoint = "http://localhost:8080"
 graph = DataHubGraph(DatahubClientConfig(server=gms_endpoint))
 
 
-current_editable_schema_metadata = graph.get_aspect_v2(
-    entity_urn=dataset_urn,
-    aspect="editableSchemaMetadata",
-    aspect_type=EditableSchemaMetadataClass,
+current_editable_schema_metadata = graph.get_aspect(
+    entity_urn=dataset_urn, aspect_type=EditableSchemaMetadataClass
 )
 
 
@@ -99,10 +93,7 @@ else:
 
 if need_write:
     event: MetadataChangeProposalWrapper = MetadataChangeProposalWrapper(
-        entityType="dataset",
-        changeType=ChangeTypeClass.UPSERT,
         entityUrn=dataset_urn,
-        aspectName="editableSchemaMetadata",
         aspect=current_editable_schema_metadata,
     )
     graph.emit(event)

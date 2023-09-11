@@ -5,22 +5,17 @@ from urllib.parse import urlparse
 from pydantic import Field, validator
 
 from datahub.configuration.common import AllowDenyPattern, ConfigurationError
-from datahub.configuration.source_common import DEFAULT_ENV, DatasetSourceConfigBase
+from datahub.configuration.source_common import (
+    EnvConfigMixin,
+    PlatformInstanceConfigMixin,
+)
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StatefulStaleMetadataRemovalConfig,
+)
 from datahub.ingestion.source.state.stateful_ingestion_base import (
-    StatefulIngestionConfig,
     StatefulIngestionConfigBase,
 )
 from datahub.utilities import config_clean
-
-
-class PulsarSourceStatefulIngestionConfig(StatefulIngestionConfig):
-    """
-    Specialization of the basic StatefulIngestionConfig to add custom config.
-    This will be used to override the stateful_ingestion config param of StatefulIngestionConfigBase
-    in the PulsarSourceConfig.
-    """
-
-    remove_stale_metadata: bool = True
 
 
 def _is_valid_hostname(hostname: str) -> bool:
@@ -37,9 +32,9 @@ def _is_valid_hostname(hostname: str) -> bool:
     return all(allowed.match(x) for x in hostname.split("."))
 
 
-class PulsarSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigBase):
-    env: str = DEFAULT_ENV
-
+class PulsarSourceConfig(
+    StatefulIngestionConfigBase, PlatformInstanceConfigMixin, EnvConfigMixin
+):
     web_service_url: str = Field(
         default="http://localhost:8080", description="The web URL for the cluster."
     )
@@ -82,7 +77,7 @@ class PulsarSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigBase):
     )
     exclude_individual_partitions: bool = Field(
         default=True,
-        description="Extract each individual partitioned topic. e.g. when turned off a topic with 100 partitions will result in 100 Datesets.",
+        description="Extract each individual partitioned topic. e.g. when turned off a topic with 100 partitions will result in 100 Datasets.",
     )
 
     tenants: List[str] = Field(
@@ -94,7 +89,7 @@ class PulsarSourceConfig(StatefulIngestionConfigBase, DatasetSourceConfigBase):
         default_factory=dict, description="Domain patterns"
     )
 
-    stateful_ingestion: Optional[PulsarSourceStatefulIngestionConfig] = Field(
+    stateful_ingestion: Optional[StatefulStaleMetadataRemovalConfig] = Field(
         default=None, description="see Stateful Ingestion"
     )
 

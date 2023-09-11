@@ -2,9 +2,15 @@ package com.linkedin.gms.factory.config;
 
 import com.datahub.authentication.AuthenticationConfiguration;
 import com.datahub.authorization.AuthorizationConfiguration;
-import com.linkedin.metadata.config.DatahubConfiguration;
+import com.linkedin.datahub.graphql.featureflags.FeatureFlags;
+import com.linkedin.metadata.config.cache.CacheConfiguration;
+import com.linkedin.metadata.config.DataHubConfiguration;
+import com.linkedin.metadata.config.search.ElasticSearchConfiguration;
 import com.linkedin.metadata.config.IngestionConfiguration;
+import com.linkedin.metadata.config.SystemUpdateConfiguration;
 import com.linkedin.metadata.config.TestsConfiguration;
+import com.linkedin.metadata.config.ViewsConfiguration;
+import com.linkedin.metadata.config.VisualConfiguration;
 import com.linkedin.metadata.telemetry.TelemetryConfiguration;
 import com.linkedin.gms.factory.spring.YamlPropertySourceFactory;
 import lombok.Data;
@@ -23,7 +29,7 @@ public class ConfigurationProvider {
    */
   private AuthenticationConfiguration authentication;
   /**
-   * Authentication related configs
+   * Authorizer related configs
    */
   private AuthorizationConfiguration authorization;
   /**
@@ -35,11 +41,38 @@ public class ConfigurationProvider {
    */
   private TelemetryConfiguration telemetry;
   /**
+   * Viz related configs
+   */
+  private VisualConfiguration visualConfig;
+  /**
    * Tests related configs
    */
   private TestsConfiguration metadataTests;
   /**
    * DataHub top-level server configurations
    */
-  private DatahubConfiguration datahub;
+  private DataHubConfiguration datahub;
+  /**
+   * Views feature related configs
+   */
+  private ViewsConfiguration views;
+  /**
+   * Feature flags indicating what is turned on vs turned off
+   */
+  private FeatureFlags featureFlags;
+
+  /**
+   * ElasticSearch configurations
+   */
+  private ElasticSearchConfiguration elasticSearch;
+
+  /**
+   * System Update configurations
+   */
+  private SystemUpdateConfiguration systemUpdate;
+
+  /**
+   * Configuration for caching
+   */
+  private CacheConfiguration cache;
 }

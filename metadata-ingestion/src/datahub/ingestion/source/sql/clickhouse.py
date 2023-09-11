@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import clickhouse_driver  # noqa: F401
 import clickhouse_sqlalchemy.types as custom_types
+import pydantic
 from clickhouse_sqlalchemy.drivers import base
 from clickhouse_sqlalchemy.drivers.base import ClickHouseDialect
 from pydantic.fields import Field
@@ -30,12 +31,12 @@ from datahub.ingestion.api.decorators import (
 )
 from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.sql.sql_common import (
-    BasicSQLAlchemyConfig,
     SQLAlchemySource,
     SqlWorkUnit,
     logger,
     register_custom_type,
 )
+from datahub.ingestion.source.sql.sql_config import BasicSQLAlchemyConfig
 from datahub.metadata.com.linkedin.pegasus2avro.dataset import UpstreamLineage
 from datahub.metadata.com.linkedin.pegasus2avro.metadata.snapshot import DatasetSnapshot
 from datahub.metadata.com.linkedin.pegasus2avro.mxe import MetadataChangeEvent
@@ -72,6 +73,9 @@ base.ischema_names["Int128"] = INTEGER
 base.ischema_names["Int256"] = INTEGER
 base.ischema_names["UInt128"] = INTEGER
 base.ischema_names["UInt256"] = INTEGER
+# This is needed for clickhouse-sqlalchemy 0.2.3
+base.ischema_names["DateTime"] = DATETIME
+base.ischema_names["DateTime64"] = DATETIME
 
 register_custom_type(custom_types.common.Array, ArrayTypeClass)
 register_custom_type(custom_types.ip.IPv4, NumberTypeClass)
@@ -119,7 +123,10 @@ class ClickHouseConfig(
 ):
     # defaults
     host_port = Field(default="localhost:8123", description="ClickHouse host URL.")
-    scheme = Field(default="clickhouse", description="", exclude=True)
+    scheme = Field(default="clickhouse", description="", hidden_from_docs=True)
+    password: pydantic.SecretStr = Field(
+        default=pydantic.SecretStr(""), description="password"
+    )
 
     secure: Optional[bool] = Field(default=None, description="")
     protocol: Optional[str] = Field(default=None, description="")
@@ -139,7 +146,8 @@ class ClickHouseConfig(
 
 
 PROPERTIES_COLUMNS = (
-    "engine, partition_key, sorting_key, primary_key, sampling_key, storage_policy"
+    "engine, partition_key, sorting_key, primary_key, sampling_key, storage_policy, "
+    + "metadata_modification_time, total_rows, total_bytes, data_paths, metadata_path"
 )
 
 
@@ -450,7 +458,6 @@ class ClickHouseSource(SQLAlchemySource):
 
         try:
             for db_row in engine.execute(text(query)):
-
                 if not self.config.schema_pattern.allowed(
                     db_row["target_schema"]
                 ) or not self.config.table_pattern.allowed(db_row["target_table"]):
@@ -494,7 +501,6 @@ class ClickHouseSource(SQLAlchemySource):
 
                 # Merging downstreams if dataset already exists and has downstreams
                 if target.dataset.path in self._lineage_map:
-
                     self._lineage_map[
                         target.dataset.path
                     ].upstreams = self._lineage_map[
@@ -517,7 +523,6 @@ class ClickHouseSource(SQLAlchemySource):
             )
 
     def _populate_lineage(self) -> None:
-
         # only dictionaries with clickhouse as a source are supported
         table_lineage_query = textwrap.dedent(
             """\

@@ -17,9 +17,7 @@ import {
     Ownership,
     OwnershipUpdate,
     SchemaMetadata,
-    StringMapEntry,
     EntityLineageResult,
-    Domain,
     SubTypes,
     Container,
     Health,
@@ -29,6 +27,13 @@ import {
     ParentContainersResult,
     EntityRelationshipsResult,
     ParentNodesResult,
+    SiblingProperties,
+    CustomPropertiesEntry,
+    DomainAssociation,
+    InputFields,
+    FineGrainedLineage,
+    EntityPrivileges,
+    Embed,
 } from '../../../types.generated';
 import { FetchedEntity } from '../../lineage/types';
 
@@ -43,11 +48,15 @@ export type EntityTab = {
 };
 
 export type EntitySidebarSection = {
-    component: React.FunctionComponent<{ properties?: any }>;
+    component: React.FunctionComponent<{ properties?: any; readOnly?: boolean }>;
     display?: {
         visible: (GenericEntityProperties, T) => boolean; // Whether the sidebar is visible on the UI. Defaults to true.
     };
     properties?: any;
+};
+
+export type EntitySubHeaderSection = {
+    component: React.FunctionComponent<{ properties?: any }>;
 };
 
 export type GenericEntityProperties = {
@@ -56,14 +65,16 @@ export type GenericEntityProperties = {
     properties?: Maybe<{
         description?: Maybe<string>;
         qualifiedName?: Maybe<string>;
+        sourceUrl?: Maybe<string>;
+        sourceRef?: Maybe<string>;
     }>;
     globalTags?: Maybe<GlobalTags>;
     glossaryTerms?: Maybe<GlossaryTerms>;
     ownership?: Maybe<Ownership>;
-    domain?: Maybe<Domain>;
+    domain?: Maybe<DomainAssociation>;
     platform?: Maybe<DataPlatform>;
     dataPlatformInstance?: Maybe<DataPlatformInstance>;
-    customProperties?: Maybe<StringMapEntry[]>;
+    customProperties?: Maybe<CustomPropertiesEntry[]>;
     institutionalMemory?: Maybe<InstitutionalMemory>;
     schemaMetadata?: Maybe<SchemaMetadata>;
     externalUrl?: Maybe<string>;
@@ -78,12 +89,21 @@ export type GenericEntityProperties = {
     subTypes?: Maybe<SubTypes>;
     entityCount?: number;
     container?: Maybe<Container>;
-    health?: Maybe<Health>;
+    health?: Maybe<Array<Health>>;
     status?: Maybe<Status>;
     deprecation?: Maybe<Deprecation>;
     parentContainers?: Maybe<ParentContainersResult>;
     children?: Maybe<EntityRelationshipsResult>;
     parentNodes?: Maybe<ParentNodesResult>;
+    isAChildren?: Maybe<EntityRelationshipsResult>;
+    siblings?: Maybe<SiblingProperties>;
+    siblingPlatforms?: Maybe<DataPlatform[]>;
+    lastIngested?: Maybe<number>;
+    inputFields?: Maybe<InputFields>;
+    fineGrainedLineages?: Maybe<FineGrainedLineage[]>;
+    privileges?: Maybe<EntityPrivileges>;
+    embed?: Maybe<Embed>;
+    exists?: boolean;
 };
 
 export type GenericEntityUpdate = {
@@ -110,7 +130,9 @@ export type UpdateEntityType<U> = (
 export type EntityContextType = {
     urn: string;
     entityType: EntityType;
+    dataNotCombinedWithSiblings: any;
     entityData: GenericEntityProperties | null;
+    loading: boolean;
     baseEntity: any;
     updateEntity?: UpdateEntityType<any> | null;
     routeToTab: (params: { tabName: string; tabParams?: Record<string, any>; method?: 'push' | 'replace' }) => void;
@@ -118,6 +140,15 @@ export type EntityContextType = {
     lineage: FetchedEntity | undefined;
 };
 
+export type SchemaContextType = {
+    refetch?: () => Promise<any>;
+};
+
 export type RequiredAndNotNull<T> = {
     [P in keyof T]-?: Exclude<T[P], null | undefined>;
+};
+
+export type EntityAndType = {
+    urn: string;
+    type: EntityType;
 };

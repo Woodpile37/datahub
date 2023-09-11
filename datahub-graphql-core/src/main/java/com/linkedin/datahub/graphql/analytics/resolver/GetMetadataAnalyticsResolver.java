@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
 import static com.linkedin.datahub.graphql.resolvers.ResolverUtils.bindArgument;
@@ -36,6 +37,7 @@ import static com.linkedin.datahub.graphql.resolvers.ResolverUtils.bindArgument;
  * Retrieves the Charts to be rendered of the Analytics screen of the DataHub application.
  */
 @RequiredArgsConstructor
+@Slf4j
 public final class GetMetadataAnalyticsResolver implements DataFetcher<List<AnalyticsChartGroup>> {
 
   private final EntityClient _entityClient;
@@ -44,11 +46,17 @@ public final class GetMetadataAnalyticsResolver implements DataFetcher<List<Anal
   public final List<AnalyticsChartGroup> get(DataFetchingEnvironment environment) throws Exception {
     final Authentication authentication = ResolverUtils.getAuthentication(environment);
     final MetadataAnalyticsInput input = bindArgument(environment.getArgument("input"), MetadataAnalyticsInput.class);
-    final AnalyticsChartGroup group = new AnalyticsChartGroup();
-    group.setGroupId("FilteredMetadataAnalytics");
-    group.setTitle("");
-    group.setCharts(getCharts(input, authentication));
-    return ImmutableList.of(group);
+
+    try {
+      final AnalyticsChartGroup group = new AnalyticsChartGroup();
+      group.setGroupId("FilteredMetadataAnalytics");
+      group.setTitle("");
+      group.setCharts(getCharts(input, authentication));
+      return ImmutableList.of(group);
+    } catch (Exception e) {
+      log.error("Failed to retrieve metadata analytics!", e);
+      return Collections.emptyList(); // Simply return nothing.
+    }
   }
 
   private List<AnalyticsChart> getCharts(MetadataAnalyticsInput input, Authentication authentication) throws Exception {
@@ -69,7 +77,8 @@ public final class GetMetadataAnalyticsResolver implements DataFetcher<List<Anal
       filter = QueryUtils.newFilter("domains.keyword", input.getDomain());
     }
 
-    SearchResult searchResult = _entityClient.searchAcrossEntities(entities, query, filter, 0, 0, authentication);
+    SearchResult searchResult = _entityClient.searchAcrossEntities(entities, query, filter, 0, 0,
+        null, authentication);
 
     List<AggregationMetadata> aggregationMetadataList = searchResult.getMetadata().getAggregations();
 
@@ -99,7 +108,7 @@ public final class GetMetadataAnalyticsResolver implements DataFetcher<List<Anal
     if (termAggregation.isPresent()) {
       List<NamedBar> termChart = buildBarChart(termAggregation.get());
       AnalyticsUtil.hydrateDisplayNameForBars(_entityClient, termChart, Constants.GLOSSARY_TERM_ENTITY_NAME,
-          ImmutableSet.of(Constants.GLOSSARY_TERM_KEY_ASPECT_NAME), AnalyticsUtil::getTermName, authentication);
+          ImmutableSet.of(Constants.GLOSSARY_TERM_KEY_ASPECT_NAME, Constants.GLOSSARY_TERM_INFO_ASPECT_NAME), AnalyticsUtil::getTermName, authentication);
       charts.add(BarChart.builder().setTitle("Entities by Term").setBars(termChart).build());
     }
 

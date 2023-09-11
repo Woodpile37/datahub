@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { Input, AutoComplete, Image, Typography } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
-import styled from 'styled-components';
+import styled from 'styled-components/macro';
 import { useHistory } from 'react-router';
 import { AutoCompleteResultForEntity, CorpUser, Entity, EntityType, ScenarioType, Tag } from '../../types.generated';
 import { IconStyleType } from '../entity/Entity';
@@ -13,8 +13,8 @@ import { EXACT_SEARCH_PREFIX } from './utils/constants';
 import { CustomAvatar } from '../shared/avatar';
 import { StyledTag } from '../entity/shared/components/styled/StyledTag';
 import { useListRecommendationsQuery } from '../../graphql/recommendations.generated';
-import { useGetAuthenticatedUserUrn } from '../useGetAuthenticatedUser';
 import { getPlatformName } from '../entity/shared/utils';
+import { useUserContext } from '../context/useUserContext';
 
 const SuggestionContainer = styled.div`
     display: flex;
@@ -113,7 +113,7 @@ const getDisplayName = (registry: EntityRegistry, entity: Entity) => {
     );
 };
 
-const renderEntitySuggestion = (query: string, entity: Entity, registry: EntityRegistry) => {
+export const renderEntitySuggestion = (query: string, entity: Entity, registry: EntityRegistry) => {
     // Special rendering.
     if (entity.type === EntityType.CorpUser) {
         return renderUserSuggestion(query, entity as CorpUser, registry);
@@ -170,6 +170,7 @@ interface Props {
     autoCompleteStyle?: React.CSSProperties;
     entityRegistry: EntityRegistry;
     fixAutoComplete?: boolean;
+    hideRecommendations?: boolean;
     setIsSearchBarFocused?: (isSearchBarFocused: boolean) => void;
     onFocus?: () => void;
     onBlur?: () => void;
@@ -193,6 +194,7 @@ export const SearchBar = ({
     inputStyle,
     autoCompleteStyle,
     fixAutoComplete,
+    hideRecommendations,
     setIsSearchBarFocused,
     onFocus,
     onBlur,
@@ -201,18 +203,21 @@ export const SearchBar = ({
     const [searchQuery, setSearchQuery] = useState<string>();
     const [selected, setSelected] = useState<string>();
     useEffect(() => setSelected(initialQuery), [initialQuery]);
+
     const searchEntityTypes = entityRegistry.getSearchEntityTypes();
-    const userUrn = useGetAuthenticatedUserUrn();
+    const userUrn = useUserContext().user?.urn;
+
     const { data } = useListRecommendationsQuery({
         variables: {
             input: {
-                userUrn,
+                userUrn: userUrn as string,
                 requestContext: {
                     scenario: ScenarioType.SearchBar,
                 },
                 limit: 1,
             },
         },
+        skip: hideRecommendations || !userUrn,
     });
 
     const effectiveQuery = searchQuery !== undefined ? searchQuery : initialQuery || '';
@@ -293,25 +298,26 @@ export const SearchBar = ({
                 style={autoCompleteStyle}
                 options={options}
                 filterOption={false}
-                onSelect={(value: string, option) => {
+                onSelect={(value, option) => {
                     // If the autocomplete option type is NOT an entity, then render as a normal search query.
                     if (
                         option.type === EXACT_AUTOCOMPLETE_OPTION_TYPE ||
                         option.type === RECOMMENDED_QUERY_OPTION_TYPE
                     ) {
                         onSearch(
-                            `${filterSearchQuery(value)}`,
+                            `${filterSearchQuery(value as string)}`,
                             searchEntityTypes.indexOf(option.type) >= 0 ? option.type : undefined,
                         );
                     } else {
                         // Navigate directly to the entity profile.
-                        history.push(getEntityPath(option.type, value, entityRegistry, false));
+                        history.push(getEntityPath(option.type, value as string, entityRegistry, false, false));
+                        setSelected('');
                     }
                 }}
                 onSearch={(value: string) => onQueryChange(value)}
                 defaultValue={initialQuery || undefined}
                 value={selected}
-                onChange={(v) => setSelected(filterSearchQuery(v))}
+                onChange={(v) => setSelected(filterSearchQuery(v as string))}
                 dropdownStyle={{
                     maxHeight: 1000,
                     overflowY: 'visible',
@@ -330,6 +336,7 @@ export const SearchBar = ({
                     data-testid="search-input"
                     onFocus={handleFocus}
                     onBlur={handleBlur}
+                    allowClear
                     prefix={<SearchOutlined onClick={() => onSearch(filterSearchQuery(searchQuery || ''))} />}
                 />
             </StyledAutoComplete>

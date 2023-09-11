@@ -3,11 +3,14 @@ package com.linkedin.datahub.graphql.types.chart.mappers;
 import com.linkedin.chart.EditableChartProperties;
 import com.linkedin.common.DataPlatformInstance;
 import com.linkedin.common.Deprecation;
+import com.linkedin.common.Embed;
 import com.linkedin.common.GlobalTags;
 import com.linkedin.common.GlossaryTerms;
+import com.linkedin.common.InputFields;
 import com.linkedin.common.InstitutionalMemory;
 import com.linkedin.common.Ownership;
 import com.linkedin.common.Status;
+import com.linkedin.common.urn.Urn;
 import com.linkedin.data.DataMap;
 import com.linkedin.datahub.graphql.generated.AccessLevel;
 import com.linkedin.datahub.graphql.generated.Chart;
@@ -20,16 +23,18 @@ import com.linkedin.datahub.graphql.generated.ChartType;
 import com.linkedin.datahub.graphql.generated.Container;
 import com.linkedin.datahub.graphql.generated.DataPlatform;
 import com.linkedin.datahub.graphql.generated.Dataset;
-import com.linkedin.datahub.graphql.generated.Domain;
 import com.linkedin.datahub.graphql.generated.EntityType;
 import com.linkedin.datahub.graphql.types.common.mappers.AuditStampMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.DataPlatformInstanceAspectMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.DeprecationMapper;
+import com.linkedin.datahub.graphql.types.common.mappers.EmbedMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.InstitutionalMemoryMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.OwnershipMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.StatusMapper;
-import com.linkedin.datahub.graphql.types.common.mappers.StringMapMapper;
+import com.linkedin.datahub.graphql.types.common.mappers.CustomPropertiesMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.util.MappingHelper;
+import com.linkedin.datahub.graphql.types.common.mappers.util.SystemMetadataUtils;
+import com.linkedin.datahub.graphql.types.domain.DomainAssociationMapper;
 import com.linkedin.datahub.graphql.types.glossary.mappers.GlossaryTermsMapper;
 import com.linkedin.datahub.graphql.types.mappers.ModelMapper;
 import com.linkedin.datahub.graphql.types.tag.mappers.GlobalTagsMapper;
@@ -56,31 +61,38 @@ public class ChartMapper implements ModelMapper<EntityResponse, Chart> {
     @Override
     public Chart apply(@Nonnull final EntityResponse entityResponse) {
         final Chart result = new Chart();
+        Urn entityUrn = entityResponse.getUrn();
 
         result.setUrn(entityResponse.getUrn().toString());
         result.setType(EntityType.CHART);
         EnvelopedAspectMap aspectMap = entityResponse.getAspects();
+        Long lastIngested = SystemMetadataUtils.getLastIngested(aspectMap);
+        result.setLastIngested(lastIngested);
+
         MappingHelper<Chart> mappingHelper = new MappingHelper<>(aspectMap, result);
         mappingHelper.mapToResult(CHART_KEY_ASPECT_NAME, this::mapChartKey);
-        mappingHelper.mapToResult(CHART_INFO_ASPECT_NAME, this::mapChartInfo);
+        mappingHelper.mapToResult(CHART_INFO_ASPECT_NAME, (entity, dataMap) -> this.mapChartInfo(entity, dataMap, entityUrn));
         mappingHelper.mapToResult(CHART_QUERY_ASPECT_NAME, this::mapChartQuery);
         mappingHelper.mapToResult(EDITABLE_CHART_PROPERTIES_ASPECT_NAME, this::mapEditableChartProperties);
         mappingHelper.mapToResult(OWNERSHIP_ASPECT_NAME, (chart, dataMap) ->
-            chart.setOwnership(OwnershipMapper.map(new Ownership(dataMap))));
+            chart.setOwnership(OwnershipMapper.map(new Ownership(dataMap), entityUrn)));
         mappingHelper.mapToResult(STATUS_ASPECT_NAME, (chart, dataMap) ->
             chart.setStatus(StatusMapper.map(new Status(dataMap))));
-        mappingHelper.mapToResult(GLOBAL_TAGS_ASPECT_NAME, this::mapGlobalTags);
+        mappingHelper.mapToResult(GLOBAL_TAGS_ASPECT_NAME, (dataset, dataMap) -> this.mapGlobalTags(dataset, dataMap, entityUrn));
         mappingHelper.mapToResult(INSTITUTIONAL_MEMORY_ASPECT_NAME, (chart, dataMap) ->
             chart.setInstitutionalMemory(InstitutionalMemoryMapper.map(new InstitutionalMemory(dataMap))));
         mappingHelper.mapToResult(GLOSSARY_TERMS_ASPECT_NAME, (chart, dataMap) ->
-            chart.setGlossaryTerms(GlossaryTermsMapper.map(new GlossaryTerms(dataMap))));
+            chart.setGlossaryTerms(GlossaryTermsMapper.map(new GlossaryTerms(dataMap), entityUrn)));
         mappingHelper.mapToResult(CONTAINER_ASPECT_NAME, this::mapContainers);
         mappingHelper.mapToResult(DOMAINS_ASPECT_NAME, this::mapDomains);
         mappingHelper.mapToResult(DEPRECATION_ASPECT_NAME, (chart, dataMap) ->
             chart.setDeprecation(DeprecationMapper.map(new Deprecation(dataMap))));
         mappingHelper.mapToResult(DATA_PLATFORM_INSTANCE_ASPECT_NAME, (dataset, dataMap) ->
             dataset.setDataPlatformInstance(DataPlatformInstanceAspectMapper.map(new DataPlatformInstance(dataMap))));
-
+        mappingHelper.mapToResult(INPUT_FIELDS_ASPECT_NAME, (chart, dataMap) ->
+            chart.setInputFields(InputFieldsMapper.map(new InputFields(dataMap), entityUrn)));
+        mappingHelper.mapToResult(EMBED_ASPECT_NAME, (chart, dataMap) ->
+            chart.setEmbed(EmbedMapper.map(new Embed(dataMap))));
         return mappingHelper.getResult();
     }
 
@@ -95,16 +107,16 @@ public class ChartMapper implements ModelMapper<EntityResponse, Chart> {
                     .setPlatformName(gmsKey.getDashboardTool()), DATA_PLATFORM_ENTITY_NAME).toString()).build());
     }
 
-    private void mapChartInfo(@Nonnull Chart chart, @Nonnull DataMap dataMap) {
+    private void mapChartInfo(@Nonnull Chart chart, @Nonnull DataMap dataMap, @Nonnull Urn entityUrn) {
         final com.linkedin.chart.ChartInfo gmsChartInfo = new com.linkedin.chart.ChartInfo(dataMap);
-        chart.setInfo(mapInfo(gmsChartInfo));
-        chart.setProperties(mapChartInfoToProperties(gmsChartInfo));
+        chart.setInfo(mapInfo(gmsChartInfo, entityUrn));
+        chart.setProperties(mapChartInfoToProperties(gmsChartInfo, entityUrn));
     }
 
     /**
      * Maps GMS {@link com.linkedin.chart.ChartInfo} to deprecated GraphQL {@link ChartInfo}
      */
-    private ChartInfo mapInfo(final com.linkedin.chart.ChartInfo info) {
+    private ChartInfo mapInfo(final com.linkedin.chart.ChartInfo info, @Nonnull Urn entityUrn) {
         final ChartInfo result = new ChartInfo();
         result.setDescription(info.getDescription());
         result.setName(info.getTitle());
@@ -136,7 +148,7 @@ public class ChartMapper implements ModelMapper<EntityResponse, Chart> {
             result.setExternalUrl(info.getChartUrl().toString());
         }
         if (info.hasCustomProperties()) {
-            result.setCustomProperties(StringMapMapper.map(info.getCustomProperties()));
+            result.setCustomProperties(CustomPropertiesMapper.map(info.getCustomProperties(), entityUrn));
         }
         return result;
     }
@@ -144,7 +156,7 @@ public class ChartMapper implements ModelMapper<EntityResponse, Chart> {
     /**
      * Maps GMS {@link com.linkedin.chart.ChartInfo} to new GraphQL {@link ChartProperties}
      */
-    private ChartProperties mapChartInfoToProperties(final com.linkedin.chart.ChartInfo info) {
+    private ChartProperties mapChartInfoToProperties(final com.linkedin.chart.ChartInfo info, @Nonnull Urn entityUrn) {
         final ChartProperties result = new ChartProperties();
         result.setDescription(info.getDescription());
         result.setName(info.getTitle());
@@ -168,7 +180,7 @@ public class ChartMapper implements ModelMapper<EntityResponse, Chart> {
             result.setExternalUrl(info.getChartUrl().toString());
         }
         if (info.hasCustomProperties()) {
-            result.setCustomProperties(StringMapMapper.map(info.getCustomProperties()));
+            result.setCustomProperties(CustomPropertiesMapper.map(info.getCustomProperties(), entityUrn));
         }
         return result;
     }
@@ -192,8 +204,8 @@ public class ChartMapper implements ModelMapper<EntityResponse, Chart> {
         chart.setEditableProperties(chartEditableProperties);
     }
 
-    private void mapGlobalTags(@Nonnull Chart chart, @Nonnull DataMap dataMap) {
-        com.linkedin.datahub.graphql.generated.GlobalTags globalTags = GlobalTagsMapper.map(new GlobalTags(dataMap));
+    private void mapGlobalTags(@Nonnull Chart chart, @Nonnull DataMap dataMap, @Nonnull Urn entityUrn) {
+        com.linkedin.datahub.graphql.generated.GlobalTags globalTags = GlobalTagsMapper.map(new GlobalTags(dataMap), entityUrn);
         chart.setGlobalTags(globalTags);
         chart.setTags(globalTags);
     }
@@ -209,11 +221,6 @@ public class ChartMapper implements ModelMapper<EntityResponse, Chart> {
 
     private void mapDomains(@Nonnull Chart chart, @Nonnull DataMap dataMap) {
         final Domains domains = new Domains(dataMap);
-        // Currently we only take the first domain if it exists.
-        if (domains.getDomains().size() > 0) {
-            chart.setDomain(Domain.builder()
-                .setType(EntityType.DOMAIN)
-                .setUrn(domains.getDomains().get(0).toString()).build());
-        }
+        chart.setDomain(DomainAssociationMapper.map(domains, chart.getUrn()));
     }
 }

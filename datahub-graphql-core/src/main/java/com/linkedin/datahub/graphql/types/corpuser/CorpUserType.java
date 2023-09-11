@@ -8,9 +8,10 @@ import com.linkedin.data.template.RecordTemplate;
 import com.linkedin.data.template.StringArray;
 import com.linkedin.datahub.graphql.QueryContext;
 import com.linkedin.datahub.graphql.authorization.AuthorizationUtils;
-import com.linkedin.datahub.graphql.authorization.ConjunctivePrivilegeGroup;
-import com.linkedin.datahub.graphql.authorization.DisjunctivePrivilegeGroup;
+import com.datahub.authorization.ConjunctivePrivilegeGroup;
+import com.datahub.authorization.DisjunctivePrivilegeGroup;
 import com.linkedin.datahub.graphql.exception.AuthorizationException;
+import com.linkedin.datahub.graphql.featureflags.FeatureFlags;
 import com.linkedin.datahub.graphql.generated.AutoCompleteResults;
 import com.linkedin.datahub.graphql.generated.CorpUser;
 import com.linkedin.datahub.graphql.generated.CorpUserUpdateInput;
@@ -30,6 +31,7 @@ import com.linkedin.identity.CorpUserEditableInfo;
 import com.linkedin.metadata.Constants;
 import com.linkedin.metadata.authorization.PoliciesConfig;
 import com.linkedin.metadata.query.AutoCompleteResult;
+import com.linkedin.metadata.query.SearchFlags;
 import com.linkedin.metadata.search.SearchResult;
 import com.linkedin.metadata.utils.GenericRecordUtils;
 import com.linkedin.mxe.MetadataChangeProposal;
@@ -51,9 +53,11 @@ import static com.linkedin.metadata.Constants.*;
 public class CorpUserType implements SearchableEntityType<CorpUser, String>, MutableType<CorpUserUpdateInput, CorpUser> {
 
     private final EntityClient _entityClient;
+    private final FeatureFlags _featureFlags;
 
-    public CorpUserType(final EntityClient entityClient) {
+    public CorpUserType(final EntityClient entityClient, final FeatureFlags featureFlags) {
         _entityClient = entityClient;
+        _featureFlags = featureFlags;
     }
 
     @Override
@@ -89,7 +93,7 @@ public class CorpUserType implements SearchableEntityType<CorpUser, String>, Mut
             }
             return results.stream()
                     .map(gmsCorpUser -> gmsCorpUser == null ? null
-                        : DataFetcherResult.<CorpUser>newResult().data(CorpUserMapper.map(gmsCorpUser)).build())
+                        : DataFetcherResult.<CorpUser>newResult().data(CorpUserMapper.map(gmsCorpUser, _featureFlags)).build())
                     .collect(Collectors.toList());
         } catch (Exception e) {
             throw new RuntimeException("Failed to batch load Datasets", e);
@@ -103,7 +107,7 @@ public class CorpUserType implements SearchableEntityType<CorpUser, String>, Mut
                                 int count,
                                 @Nonnull final QueryContext context) throws Exception {
         final SearchResult searchResult = _entityClient.search("corpuser", query, Collections.emptyMap(), start, count,
-            context.getAuthentication());
+            context.getAuthentication(), new SearchFlags().setFulltext(true));
         return UrnSearchResultsMapper.map(searchResult);
     }
 

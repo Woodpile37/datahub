@@ -19,6 +19,8 @@ import { MLModelEntity } from '../../app/entity/mlModel/MLModelEntity';
 import { MLModelGroupEntity } from '../../app/entity/mlModelGroup/MLModelGroupEntity';
 import { ChartEntity } from '../../app/entity/chart/ChartEntity';
 import { DashboardEntity } from '../../app/entity/dashboard/DashboardEntity';
+import { LineageExplorerContext } from '../../app/lineage/utils/LineageExplorerContext';
+import UserContextProvider from '../../app/context/UserContextProvider';
 
 type Props = {
     children: React.ReactNode;
@@ -53,7 +55,30 @@ export default ({ children, initialEntries }: Props) => {
     return (
         <ThemeProvider theme={defaultThemeConfig}>
             <MemoryRouter initialEntries={initialEntries}>
-                <EntityRegistryContext.Provider value={entityRegistry}>{children}</EntityRegistryContext.Provider>
+                <EntityRegistryContext.Provider value={entityRegistry}>
+                    <UserContextProvider>
+                        <LineageExplorerContext.Provider
+                            value={{
+                                expandTitles: false,
+                                showColumns: false,
+                                collapsedColumnsNodes: {},
+                                setCollapsedColumnsNodes: null,
+                                fineGrainedMap: {},
+                                selectedField: null,
+                                setSelectedField: () => {},
+                                highlightedEdges: [],
+                                setHighlightedEdges: () => {},
+                                visibleColumnsByUrn: {},
+                                setVisibleColumnsByUrn: () => {},
+                                columnsByUrn: {},
+                                setColumnsByUrn: () => {},
+                                refetchCenterNode: () => {},
+                            }}
+                        >
+                            {children}
+                        </LineageExplorerContext.Provider>
+                    </UserContextProvider>
+                </EntityRegistryContext.Provider>
             </MemoryRouter>
         </ThemeProvider>
     );

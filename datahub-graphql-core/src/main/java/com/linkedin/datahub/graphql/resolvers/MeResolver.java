@@ -2,9 +2,11 @@ package com.linkedin.datahub.graphql.resolvers;
 
 import com.datahub.authorization.AuthorizationRequest;
 import com.datahub.authorization.AuthorizationResult;
-import com.datahub.authorization.Authorizer;
+import com.datahub.plugins.auth.authorization.Authorizer;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.datahub.graphql.QueryContext;
+import com.linkedin.datahub.graphql.authorization.AuthorizationUtils;
+import com.linkedin.datahub.graphql.featureflags.FeatureFlags;
 import com.linkedin.datahub.graphql.generated.AuthenticatedUser;
 import com.linkedin.datahub.graphql.generated.CorpUser;
 import com.linkedin.datahub.graphql.generated.PlatformPrivileges;
@@ -19,6 +21,7 @@ import java.net.URISyntaxException;
 import java.util.Collections;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import javax.annotation.Nonnull;
 
 import static com.linkedin.datahub.graphql.resolvers.ingest.IngestionAuthUtils.*;
 import static com.linkedin.metadata.Constants.*;
@@ -35,9 +38,11 @@ import static com.linkedin.metadata.Constants.*;
 public class MeResolver implements DataFetcher<CompletableFuture<AuthenticatedUser>> {
 
   private final EntityClient _entityClient;
+  private final FeatureFlags _featureFlags;
 
-  public MeResolver(final EntityClient entityClient) {
+  public MeResolver(final EntityClient entityClient, final FeatureFlags featureFlags) {
     _entityClient = entityClient;
+    _featureFlags = featureFlags;
   }
 
   @Override
@@ -49,7 +54,7 @@ public class MeResolver implements DataFetcher<CompletableFuture<AuthenticatedUs
         final Urn userUrn = Urn.createFromString(context.getActorUrn());
         final EntityResponse gmsUser = _entityClient.batchGetV2(CORP_USER_ENTITY_NAME,
                 Collections.singleton(userUrn), null, context.getAuthentication()).get(userUrn);
-        final CorpUser corpUser = CorpUserMapper.map(gmsUser);
+        final CorpUser corpUser = CorpUserMapper.map(gmsUser, _featureFlags);
 
         // 2. Get platform privileges
         final PlatformPrivileges platformPrivileges = new PlatformPrivileges();
@@ -63,6 +68,11 @@ public class MeResolver implements DataFetcher<CompletableFuture<AuthenticatedUs
         platformPrivileges.setManageTokens(canManageTokens(context));
         platformPrivileges.setManageTests(canManageTests(context));
         platformPrivileges.setManageGlossaries(canManageGlossaries(context));
+        platformPrivileges.setManageUserCredentials(canManageUserCredentials(context));
+        platformPrivileges.setCreateDomains(AuthorizationUtils.canCreateDomains(context));
+        platformPrivileges.setCreateTags(AuthorizationUtils.canCreateTags(context));
+        platformPrivileges.setManageTags(AuthorizationUtils.canManageTags(context));
+        platformPrivileges.setManageGlobalViews(AuthorizationUtils.canManageGlobalViews(context));
 
         // Construct and return authenticated user object.
         final AuthenticatedUser authUser = new AuthenticatedUser();
@@ -129,6 +139,14 @@ public class MeResolver implements DataFetcher<CompletableFuture<AuthenticatedUs
    */
   private boolean canManageGlossaries(final QueryContext context) {
     return isAuthorized(context.getAuthorizer(), context.getActorUrn(), PoliciesConfig.MANAGE_GLOSSARIES_PRIVILEGE);
+  }
+
+  /**
+   * Returns true if the authenticated user has privileges to manage user credentials
+   */
+  private boolean canManageUserCredentials(@Nonnull QueryContext context) {
+    return isAuthorized(context.getAuthorizer(), context.getActorUrn(),
+        PoliciesConfig.MANAGE_USER_CREDENTIALS_PRIVILEGE);
   }
 
   /**

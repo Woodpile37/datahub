@@ -1,7 +1,7 @@
 import { UserOutlined } from '@ant-design/icons';
 import * as React from 'react';
 import { CorpUser, EntityType, SearchResult } from '../../../types.generated';
-import { Entity, IconStyleType, PreviewType } from '../Entity';
+import { Entity, EntityCapabilityType, IconStyleType, PreviewType } from '../Entity';
 import { getDataForEntityType } from '../shared/containers/profile/utils';
 import { Preview } from './preview/Preview';
 import UserProfile from './UserProfile';
@@ -12,20 +12,20 @@ import UserProfile from './UserProfile';
 export class UserEntity implements Entity<CorpUser> {
     type: EntityType = EntityType.CorpUser;
 
-    icon = (fontSize: number, styleType: IconStyleType) => {
+    icon = (fontSize: number, styleType: IconStyleType, color?: string) => {
         if (styleType === IconStyleType.TAB_VIEW) {
-            return <UserOutlined style={{ fontSize }} />;
+            return <UserOutlined style={{ fontSize, color }} />;
         }
 
         if (styleType === IconStyleType.HIGHLIGHT) {
-            return <UserOutlined style={{ fontSize }} />;
+            return <UserOutlined style={{ fontSize, color }} />;
         }
 
         return (
             <UserOutlined
                 style={{
                     fontSize,
-                    color: '#BFBFBF',
+                    color: color || '#BFBFBF',
                 }}
             />
         );
@@ -67,11 +67,16 @@ export class UserEntity implements Entity<CorpUser> {
             data.properties?.fullName ||
             data.info?.displayName || // Deprecated info field
             data.info?.fullName || // Deprecated info field
-            data.username
+            data.username ||
+            data.urn
         );
     };
 
     getGenericEntityProperties = (user: CorpUser) => {
         return getDataForEntityType({ data: user, entityType: this.type, getOverrideProperties: (data) => data });
+    };
+
+    supportedCapabilities = () => {
+        return new Set([EntityCapabilityType.ROLES]);
     };
 }

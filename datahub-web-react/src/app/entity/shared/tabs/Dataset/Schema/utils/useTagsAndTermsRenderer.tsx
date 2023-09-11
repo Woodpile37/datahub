@@ -2,16 +2,24 @@ import React from 'react';
 import { EditableSchemaMetadata, EntityType, GlobalTags, SchemaField } from '../../../../../../../types.generated';
 import TagTermGroup from '../../../../../../shared/tags/TagTermGroup';
 import { pathMatchesNewPath } from '../../../../../dataset/profile/schema/utils/utils';
-import { useEntityData, useRefetch } from '../../../../EntityContext';
+import { useMutationUrn, useRefetch } from '../../../../EntityContext';
+import { useSchemaRefetch } from '../SchemaContext';
 
 export default function useTagsAndTermsRenderer(
     editableSchemaMetadata: EditableSchemaMetadata | null | undefined,
     tagHoveredIndex: string | undefined,
     setTagHoveredIndex: (index: string | undefined) => void,
     options: { showTags: boolean; showTerms: boolean },
+    filterText: string,
 ) {
-    const { urn } = useEntityData();
+    const urn = useMutationUrn();
     const refetch = useRefetch();
+    const schemaRefetch = useSchemaRefetch();
+
+    const refresh: any = () => {
+        refetch?.();
+        schemaRefetch?.();
+    };
 
     const tagAndTermRender = (tags: GlobalTags, record: SchemaField, rowIndex: number | undefined) => {
         const relevantEditableFieldInfo = editableSchemaMetadata?.editableSchemaFieldInfo.find(
@@ -33,7 +41,8 @@ export default function useTagsAndTermsRenderer(
                     entityUrn={urn}
                     entityType={EntityType.Dataset}
                     entitySubresource={record.fieldPath}
-                    refetch={refetch}
+                    highlightText={filterText}
+                    refetch={refresh}
                 />
             </div>
         );

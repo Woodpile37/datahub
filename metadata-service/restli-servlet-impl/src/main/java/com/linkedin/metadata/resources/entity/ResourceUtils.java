@@ -12,4 +12,5 @@ public class ResourceUtils {
   public static Set<String> getAllAspectNames(final EntityService entityService, final String entityName) {
     return entityService.getEntityAspectNames(entityName);
   }
+
 }

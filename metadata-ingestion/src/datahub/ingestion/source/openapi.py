@@ -102,11 +102,6 @@ class OpenApiConfig(ConfigModel):
         return sw_dict
 
 
-# class ParserWarning(UserWarning):
-#     def __init__(self, message: str, key: str) -> None:
-#         self.message
-
-
 class ApiWorkUnit(MetadataWorkUnit):
     pass
 
@@ -118,7 +113,7 @@ class ApiWorkUnit(MetadataWorkUnit):
 class APISource(Source, ABC):
     """
 
-    This plugin is meant to gather dataset-like informations about OpenApi Endpoints.
+    This plugin is meant to gather dataset-like information about OpenApi Endpoints.
 
     As example, if by calling GET at the endpoint at `https://test_endpoint.com/api/users/` you obtain as result:
     ```JSON
@@ -325,9 +320,6 @@ class APISource(Source, ABC):
 
     def get_report(self):
         return self.report
-
-    def close(self):
-        pass
 
 
 class OpenApiSource(APISource):

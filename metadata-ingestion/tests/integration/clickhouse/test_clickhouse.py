@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 from freezegun import freeze_time
 
@@ -21,12 +23,19 @@ def test_clickhouse_ingest(docker_compose_runner, pytestconfig, tmp_path, mock_t
         # Run the metadata ingestion pipeline.
         config_file = (test_resources_dir / "clickhouse_to_file.yml").resolve()
         run_datahub_cmd(
-            ["ingest", "--strict-warnings", "-c", f"{config_file}"], tmp_path=tmp_path
+            ["ingest", "-c", f"{config_file}"],
+            tmp_path=tmp_path,
         )
-
+        # These paths change from one instance run of the clickhouse docker to the other, and the FROZEN_TIME does not apply to these.
+        ignore_paths: List[str] = [
+            r"root\[\d+\]\['proposedSnapshot'\].+\['aspects'\].+\['customProperties'\]\['metadata_modification_time'\]",
+            r"root\[\d+\]\['proposedSnapshot'\].+\['aspects'\].+\['customProperties'\]\['data_paths'\]",
+            r"root\[\d+\]\['proposedSnapshot'\].+\['aspects'\].+\['customProperties'\]\['metadata_path'\]",
+        ]
         # Verify the output.
         mce_helpers.check_golden_file(
             pytestconfig,
+            ignore_paths=ignore_paths,
             output_path=tmp_path / "clickhouse_mces.json",
             golden_path=test_resources_dir / "clickhouse_mces_golden.json",
         )

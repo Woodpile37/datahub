@@ -9,8 +9,8 @@ import com.linkedin.common.urn.UrnUtils;
 import com.linkedin.data.template.StringArray;
 import com.linkedin.datahub.graphql.QueryContext;
 import com.linkedin.datahub.graphql.authorization.AuthorizationUtils;
-import com.linkedin.datahub.graphql.authorization.ConjunctivePrivilegeGroup;
-import com.linkedin.datahub.graphql.authorization.DisjunctivePrivilegeGroup;
+import com.datahub.authorization.ConjunctivePrivilegeGroup;
+import com.datahub.authorization.DisjunctivePrivilegeGroup;
 import com.linkedin.datahub.graphql.exception.AuthorizationException;
 import com.linkedin.datahub.graphql.generated.AutoCompleteResults;
 import com.linkedin.datahub.graphql.generated.BrowsePath;
@@ -35,6 +35,7 @@ import com.linkedin.entity.client.EntityClient;
 import com.linkedin.metadata.authorization.PoliciesConfig;
 import com.linkedin.metadata.browse.BrowseResult;
 import com.linkedin.metadata.query.AutoCompleteResult;
+import com.linkedin.metadata.query.SearchFlags;
 import com.linkedin.metadata.search.SearchResult;
 import com.linkedin.mxe.MetadataChangeProposal;
 import com.linkedin.r2.RemoteInvocationException;
@@ -85,7 +86,8 @@ public class NotebookType implements SearchableEntityType<Notebook, String>, Bro
     // Put empty map here according to
     // https://datahubspace.slack.com/archives/C029A3M079U/p1646288772126639
     final Map<String, String> facetFilters = Collections.emptyMap();
-    final SearchResult searchResult = _entityClient.search(NOTEBOOK_ENTITY_NAME, query, facetFilters, start, count, context.getAuthentication());
+    final SearchResult searchResult = _entityClient.search(NOTEBOOK_ENTITY_NAME, query, facetFilters, start, count,
+            context.getAuthentication(), new SearchFlags().setFulltext(true));
     return UrnSearchResultsMapper.map(searchResult);
   }
 
@@ -175,7 +177,7 @@ public class NotebookType implements SearchableEntityType<Notebook, String>, Bro
     proposals.forEach(proposal -> proposal.setEntityUrn(UrnUtils.getUrn(urn)));
 
     try {
-      _entityClient.batchIngestProposals(proposals, context.getAuthentication());
+      _entityClient.batchIngestProposals(proposals, context.getAuthentication(), false);
     } catch (RemoteInvocationException e) {
       throw new RuntimeException(String.format("Failed to write entity with urn %s", urn), e);
     }

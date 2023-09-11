@@ -27,7 +27,7 @@ from datahub.ingestion.api.decorators import (
     platform_name,
     support_status,
 )
-from datahub.ingestion.api.source import Source, SourceReport
+from datahub.ingestion.api.source import SourceReport
 from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.extractor import schema_util
 from datahub.ingestion.source.iceberg.iceberg_common import (
@@ -35,6 +35,14 @@ from datahub.ingestion.source.iceberg.iceberg_common import (
     IcebergSourceReport,
 )
 from datahub.ingestion.source.iceberg.iceberg_profiler import IcebergProfiler
+from datahub.ingestion.source.state.entity_removal_state import GenericCheckpointState
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StaleEntityRemovalHandler,
+)
+from datahub.ingestion.source.state.stateful_ingestion_base import (
+    StatefulIngestionSourceBase,
+)
+from datahub.metadata.com.linkedin.pegasus2avro.common import Status
 from datahub.metadata.com.linkedin.pegasus2avro.metadata.snapshot import DatasetSnapshot
 from datahub.metadata.com.linkedin.pegasus2avro.mxe import MetadataChangeEvent
 from datahub.metadata.com.linkedin.pegasus2avro.schema import (
@@ -43,12 +51,15 @@ from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     SchemaMetadata,
 )
 from datahub.metadata.schema_classes import (
-    ChangeTypeClass,
     DataPlatformInstanceClass,
     DatasetPropertiesClass,
     OwnerClass,
     OwnershipClass,
     OwnershipTypeClass,
+)
+from datahub.utilities.source_helpers import (
+    auto_stale_entity_removal,
+    auto_status_aspect,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -81,7 +92,8 @@ _all_atomic_types = {
     SourceCapability.OWNERSHIP,
     "Optionally enabled via configuration by specifying which Iceberg table property holds user or group ownership.",
 )
-class IcebergSource(Source):
+@capability(SourceCapability.DELETION_DETECTION, "Enabled via stateful ingestion")
+class IcebergSource(StatefulIngestionSourceBase):
     """
     ## Integration Details
 
@@ -101,11 +113,19 @@ class IcebergSource(Source):
     """
 
     def __init__(self, config: IcebergSourceConfig, ctx: PipelineContext) -> None:
-        super().__init__(ctx)
-        self.PLATFORM: str = "iceberg"
+        super().__init__(config, ctx)
+        self.platform: str = "iceberg"
         self.report: IcebergSourceReport = IcebergSourceReport()
         self.config: IcebergSourceConfig = config
         self.iceberg_client: FilesystemTables = config.filesystem_tables
+
+        self.stale_entity_removal_handler = StaleEntityRemovalHandler(
+            source=self,
+            config=self.config,
+            state_type_class=GenericCheckpointState,
+            pipeline_name=self.ctx.pipeline_name,
+            run_id=self.ctx.run_id,
+        )
 
     @classmethod
     def create(cls, config_dict: Dict, ctx: PipelineContext) -> "IcebergSource":
@@ -113,6 +133,12 @@ class IcebergSource(Source):
         return cls(config, ctx)
 
     def get_workunits(self) -> Iterable[MetadataWorkUnit]:
+        return auto_stale_entity_removal(
+            self.stale_entity_removal_handler,
+            auto_status_aspect(self.get_workunits_internal()),
+        )
+
+    def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
         for dataset_path, dataset_name in self.config.get_paths():  # Tuple[str, str]
             try:
                 if not self.config.table_pattern.allowed(dataset_name):
@@ -140,14 +166,14 @@ class IcebergSource(Source):
     ) -> Iterable[MetadataWorkUnit]:
         self.report.report_table_scanned(dataset_name)
         dataset_urn: str = make_dataset_urn_with_platform_instance(
-            self.PLATFORM,
+            self.platform,
             dataset_name,
             self.config.platform_instance,
             self.config.env,
         )
         dataset_snapshot = DatasetSnapshot(
             urn=dataset_urn,
-            aspects=[],
+            aspects=[Status(removed=False)],
         )
 
         custom_properties: Dict = dict(table.properties())
@@ -222,14 +248,11 @@ class IcebergSource(Source):
         # If we are a platform instance based source, emit the instance aspect
         if self.config.platform_instance:
             mcp = MetadataChangeProposalWrapper(
-                entityType="dataset",
-                changeType=ChangeTypeClass.UPSERT,
                 entityUrn=dataset_urn,
-                aspectName="dataPlatformInstance",
                 aspect=DataPlatformInstanceClass(
-                    platform=make_data_platform_urn(self.PLATFORM),
+                    platform=make_data_platform_urn(self.platform),
                     instance=make_dataplatform_instance_urn(
-                        self.PLATFORM, self.config.platform_instance
+                        self.platform, self.config.platform_instance
                     ),
                 ),
             )
@@ -247,7 +270,7 @@ class IcebergSource(Source):
         )
         schema_metadata = SchemaMetadata(
             schemaName=dataset_name,
-            platform=make_data_platform_urn(self.PLATFORM),
+            platform=make_data_platform_urn(self.platform),
             version=0,
             hash="",
             platformSchema=OtherSchema(rawSchema=repr(table.schema())),
@@ -298,9 +321,6 @@ class IcebergSource(Source):
     def get_report(self) -> SourceReport:
         return self.report
 
-    def close(self) -> None:
-        pass
-
 
 def _parse_datatype(type: IcebergTypes.Type, nullable: bool = False) -> Dict[str, Any]:
     # Check for complex types: struct, list, map
@@ -313,16 +333,30 @@ def _parse_datatype(type: IcebergTypes.Type, nullable: bool = False) -> Dict[str
             "_nullable": nullable,
         }
     elif type.is_map_type():
+        # The Iceberg Map type will be handled differently.  The idea is to translate the map
+        # similar to the Map.Entry struct of Java i.e. as an array of map_entry struct, where
+        # the map_entry struct has a key field and a value field. The key and value type can
+        # be complex or primitive types.
         map_type: IcebergTypes.MapType = type
-        kt = _parse_datatype(map_type.key_type())
-        vt = _parse_datatype(map_type.value_type())
-        # keys are assumed to be strings in avro map
+        map_entry: Dict[str, Any] = {
+            "type": "record",
+            "name": _gen_name("__map_entry_"),
+            "fields": [
+                {
+                    "name": "key",
+                    "type": _parse_datatype(map_type.key_type(), False),
+                },
+                {
+                    "name": "value",
+                    "type": _parse_datatype(map_type.value_type(), True),
+                },
+            ],
+        }
         return {
-            "type": "map",
-            "values": vt,
-            "native_data_type": str(map_type),
-            "key_type": kt,
-            "key_native_data_type": repr(map_type.key_type()),
+            "type": "array",
+            "items": map_entry,
+            "native_data_type": str(type),
+            "_nullable": nullable,
         }
     elif type.is_struct_type():
         structType: IcebergTypes.StructType = type
@@ -340,7 +374,7 @@ def _parse_struct_fields(parts: Tuple[NestedField], nullable: bool) -> Dict[str,
         fields.append({"name": field_name, "type": field_type, "doc": nested_field.doc})
     return {
         "type": "record",
-        "name": "__struct_{}".format(str(uuid.uuid4()).replace("-", "")),
+        "name": _gen_name("__struct_"),
         "fields": fields,
         "native_data_type": "struct<{}>".format(parts),
         "_nullable": nullable,
@@ -367,7 +401,7 @@ def _parse_basic_datatype(
         fixed_type: IcebergTypes.FixedType = type
         return {
             "type": "fixed",
-            "name": "name",  # TODO: Pass-in field name since it is required by Avro spec
+            "name": _gen_name("__fixed_"),
             "size": fixed_type.length,
             "native_data_type": repr(fixed_type),
             "_nullable": nullable,
@@ -380,7 +414,9 @@ def _parse_basic_datatype(
         return {
             # "type": "bytes", # when using bytes, avro drops _nullable attribute and others.  See unit test.
             "type": "fixed",  # to fix avro bug ^ resolved by using a fixed type
-            "name": "bogus",  # to fix avro bug ^ resolved by using a fixed type
+            "name": _gen_name(
+                "__fixed_"
+            ),  # to fix avro bug ^ resolved by using a fixed type
             "size": 1,  # to fix avro bug ^ resolved by using a fixed type
             "logicalType": "decimal",
             "precision": decimal_type.precision,
@@ -431,3 +467,7 @@ def _parse_basic_datatype(
         }
 
     return {"type": "null", "native_data_type": repr(type)}
+
+
+def _gen_name(prefix: str) -> str:
+    return f"{prefix}{str(uuid.uuid4()).replace('-', '')}"

@@ -1,16 +1,19 @@
 import json
 import logging
 import os
+import pathlib
 import pprint
+import re
 import shutil
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+import tempfile
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import deepdiff
 
-from datahub.metadata.schema_classes import (
-    MetadataChangeEventClass,
-    MetadataChangeProposalClass,
-)
+from datahub.emitter.mcp import MetadataChangeProposalWrapper
+from datahub.ingestion.sink.file import write_metadata_file
+from datahub.ingestion.source.file import read_metadata_file
+from datahub.metadata.schema_classes import MetadataChangeEventClass
 from datahub.utilities.urns.urn import Urn
 from tests.test_helpers.type_helpers import PytestConfig
 
@@ -91,11 +94,23 @@ def assert_mces_equal(
             exclude_regex_paths=ignore_paths,
             ignore_order=True,
         )
-        if clean_diff != diff:
-            logger.warning(
-                f"MCE-s differ, clean MCE-s are fine\n{pprint.pformat(diff)}"
-            )
+        if not clean_diff:
+            logger.debug(f"MCE-s differ, clean MCE-s are fine\n{pprint.pformat(diff)}")
         diff = clean_diff
+        if diff:
+            # do some additional processing to emit helpful messages
+            output_urns = _get_entity_urns(output)
+            golden_urns = _get_entity_urns(golden)
+            in_golden_but_not_in_output = golden_urns - output_urns
+            in_output_but_not_in_golden = output_urns - golden_urns
+            if in_golden_but_not_in_output:
+                logger.info(
+                    f"Golden file has {len(in_golden_but_not_in_output)} more urns: {in_golden_but_not_in_output}"
+                )
+            if in_output_but_not_in_golden:
+                logger.info(
+                    f"Golden file has {len(in_output_but_not_in_golden)} more urns: {in_output_but_not_in_golden}"
+                )
 
     assert (
         not diff
@@ -108,9 +123,13 @@ def check_golden_file(
     golden_path: Union[str, os.PathLike],
     ignore_paths: Optional[List[str]] = None,
 ) -> None:
-
     update_golden = pytestconfig.getoption("--update-golden-files")
+    copy_output = pytestconfig.getoption("--copy-output-files")
     golden_exists = os.path.isfile(golden_path)
+
+    if copy_output:
+        shutil.copyfile(str(output_path), str(golden_path) + ".output")
+        print(f"Copied output file to {golden_path}.output")
 
     if not update_golden and not golden_exists:
         raise FileNotFoundError(
@@ -124,7 +143,12 @@ def check_golden_file(
         golden = load_json_file(output_path)
         shutil.copyfile(str(output_path), str(golden_path))
     else:
-        golden = load_json_file(golden_path)
+        # We have to "normalize" the golden file by reading and writing it back out.
+        # This will clean up nulls, double serialization, and other formatting issues.
+        with tempfile.NamedTemporaryFile() as temp:
+            golden_metadata = read_metadata_file(pathlib.Path(golden_path))
+            write_metadata_file(pathlib.Path(temp.name), golden_metadata)
+            golden = load_json_file(temp.name)
 
     try:
         assert_mces_equal(output, golden, ignore_paths)
@@ -192,6 +216,33 @@ def _element_matches_pattern(
         return (True, re.search(pattern, str(element)) is not None)
 
 
+def get_entity_urns(events_file: str) -> Set[str]:
+    events = load_json_file(events_file)
+    assert isinstance(events, list)
+    return _get_entity_urns(events)
+
+
+def _get_entity_urns(events_list: List[Dict]) -> Set[str]:
+    entity_type = "dataset"
+    # mce urns
+    mce_urns = set(
+        [
+            _get_element(x, _get_mce_urn_path_spec(entity_type))
+            for x in events_list
+            if _get_filter(mce=True, entity_type=entity_type)(x)
+        ]
+    )
+    mcp_urns = set(
+        [
+            _get_element(x, _get_mcp_urn_path_spec())
+            for x in events_list
+            if _get_filter(mcp=True, entity_type=entity_type)(x)
+        ]
+    )
+    all_urns = mce_urns.union(mcp_urns)
+    return all_urns
+
+
 def assert_mcp_entity_urn(
     filter: str, entity_type: str, regex_pattern: str, file: str
 ) -> int:
@@ -234,6 +285,7 @@ def _get_mcp_urn_path_spec() -> List[str]:
 def assert_mce_entity_urn(
     filter: str, entity_type: str, regex_pattern: str, file: str
 ) -> int:
+    """Assert that all mce entity urns must match the regex pattern passed in. Return the number of events matched"""
 
     test_output = load_json_file(file)
     if isinstance(test_output, list):
@@ -257,7 +309,11 @@ def assert_mce_entity_urn(
 
 
 def assert_for_each_entity(
-    entity_type: str, aspect_name: str, aspect_field_matcher: Dict[str, Any], file: str
+    entity_type: str,
+    aspect_name: str,
+    aspect_field_matcher: Dict[str, Any],
+    file: str,
+    exception_urns: List[str] = [],
 ) -> int:
     """Assert that an aspect name with the desired fields exists for each entity urn"""
     test_output = load_json_file(file)
@@ -289,9 +345,9 @@ def assert_for_each_entity(
     ]:
         if o.get(MCPConstants.ASPECT_NAME) == aspect_name:
             # load the inner aspect payload and assign to this urn
-            aspect_map[o[MCPConstants.ENTITY_URN]] = json.loads(
-                o.get(MCPConstants.ASPECT_VALUE, {}).get("value")
-            )
+            aspect_map[o[MCPConstants.ENTITY_URN]] = o.get(
+                MCPConstants.ASPECT_VALUE, {}
+            ).get("json")
 
     success: List[str] = []
     failures: List[str] = []
@@ -302,7 +358,7 @@ def assert_for_each_entity(
                     aspect_val, [f]
                 ), f"urn: {urn} -> Field {f} must match value {aspect_field_matcher[f]}, found {_get_element(aspect_val, [f])}"
             success.append(urn)
-        else:
+        elif urn not in exception_urns:
             print(f"Adding {urn} to failures")
             failures.append(urn)
 
@@ -319,6 +375,7 @@ def assert_for_each_entity(
 def assert_entity_mce_aspect(
     entity_urn: str, aspect: Any, aspect_type: Type, file: str
 ) -> int:
+    # TODO: Replace with read_metadata_file()
     test_output = load_json_file(file)
     entity_type = Urn.create_from_string(entity_urn).get_type()
     assert isinstance(test_output, list)
@@ -341,12 +398,13 @@ def assert_entity_mce_aspect(
 def assert_entity_mcp_aspect(
     entity_urn: str, aspect_field_matcher: Dict[str, Any], aspect_name: str, file: str
 ) -> int:
+    # TODO: Replace with read_metadata_file()
     test_output = load_json_file(file)
     entity_type = Urn.create_from_string(entity_urn).get_type()
     assert isinstance(test_output, list)
     # mcps that match entity_urn
-    mcps: List[MetadataChangeProposalClass] = [
-        MetadataChangeProposalClass.from_obj(x)
+    mcps: List[MetadataChangeProposalWrapper] = [
+        MetadataChangeProposalWrapper.from_obj_require_wrapper(x)
         for x in test_output
         if _get_filter(mcp=True, entity_type=entity_type)(x)
         and _get_element(x, _get_mcp_urn_path_spec()) == entity_urn
@@ -355,10 +413,70 @@ def assert_entity_mcp_aspect(
     for mcp in mcps:
         if mcp.aspectName == aspect_name:
             assert mcp.aspect
-            aspect_val = json.loads(mcp.aspect.value)
+            aspect_val = mcp.aspect.to_obj()
             for f in aspect_field_matcher:
                 assert aspect_field_matcher[f] == _get_element(
                     aspect_val, [f]
                 ), f"urn: {mcp.entityUrn} -> Field {f} must match value {aspect_field_matcher[f]}, found {_get_element(aspect_val, [f])}"
                 matches = matches + 1
     return matches
+
+
+def assert_entity_urn_not_like(entity_type: str, regex_pattern: str, file: str) -> int:
+    """Assert that there are no entity urns that match the regex pattern passed in. Returns the total number of events in the file"""
+
+    # TODO: Refactor common code with assert_entity_urn_like.
+    test_output = load_json_file(file)
+    assert isinstance(test_output, list)
+    # mce urns
+    mce_urns = set(
+        [
+            _get_element(x, _get_mce_urn_path_spec(entity_type))
+            for x in test_output
+            if _get_filter(mce=True, entity_type=entity_type)(x)
+        ]
+    )
+    mcp_urns = set(
+        [
+            _get_element(x, _get_mcp_urn_path_spec())
+            for x in test_output
+            if _get_filter(mcp=True, entity_type=entity_type)(x)
+        ]
+    )
+    all_urns = mce_urns.union(mcp_urns)
+    print(all_urns)
+    matched_urns = [u for u in all_urns if re.match(regex_pattern, u)]
+    if matched_urns:
+        raise AssertionError(f"urns found that match the deny list {matched_urns}")
+    return len(test_output)
+
+
+def assert_entity_urn_like(entity_type: str, regex_pattern: str, file: str) -> int:
+    """Assert that there exist entity urns that match the regex pattern passed in. Returns the total number of events in the file"""
+
+    test_output = load_json_file(file)
+    assert isinstance(test_output, list)
+    # mce urns
+    mce_urns = set(
+        [
+            _get_element(x, _get_mce_urn_path_spec(entity_type))
+            for x in test_output
+            if _get_filter(mce=True, entity_type=entity_type)(x)
+        ]
+    )
+    mcp_urns = set(
+        [
+            _get_element(x, _get_mcp_urn_path_spec())
+            for x in test_output
+            if _get_filter(mcp=True, entity_type=entity_type)(x)
+        ]
+    )
+    all_urns = mce_urns.union(mcp_urns)
+    print(all_urns)
+    matched_urns = [u for u in all_urns if re.match(regex_pattern, u)]
+    if matched_urns:
+        return len(matched_urns)
+    else:
+        raise AssertionError(
+            f"No urns found that match the pattern {regex_pattern}. Full list is {all_urns}"
+        )

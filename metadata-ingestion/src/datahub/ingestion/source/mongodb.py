@@ -10,7 +10,7 @@ from pydantic.fields import Field
 from pymongo.mongo_client import MongoClient
 
 from datahub.configuration.common import AllowDenyPattern
-from datahub.configuration.source_common import EnvBasedSourceConfigBase
+from datahub.configuration.source_common import EnvConfigMixin
 from datahub.ingestion.api.common import PipelineContext
 from datahub.ingestion.api.decorators import (
     SourceCapability,
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 DENY_DATABASE_LIST = set(["admin", "config", "local"])
 
 
-class MongoDBConfig(EnvBasedSourceConfigBase):
+class MongoDBConfig(EnvConfigMixin):
     # See the MongoDB authentication docs for details and examples.
     # https://pymongo.readthedocs.io/en/stable/examples/authentication.html
     connect_uri: str = Field(
@@ -172,9 +172,9 @@ def construct_schema_pymongo(
             maximum size of the document that will be considered for generating the schema.
     """
 
-    doc_size_field = "temporary_doc_size_field"
     aggregations: List[Dict] = []
     if is_version_gte_4_4:
+        doc_size_field = "temporary_doc_size_field"
         # create a temporary field to store the size of the document. filter on it and then remove it.
         aggregations = [
             {"$addFields": {doc_size_field: {"$bsonSize": "$$ROOT"}}},
@@ -241,7 +241,7 @@ class MongoDBSource(Source):
 
         # This cheaply tests the connection. For details, see
         # https://pymongo.readthedocs.io/en/stable/api/pymongo/mongo_client.html#pymongo.mongo_client.MongoClient
-        self.mongo_client.admin.command("ismaster")
+        self.mongo_client.admin.command("ping")
 
     @classmethod
     def create(cls, config_dict: dict, ctx: PipelineContext) -> "MongoDBSource":
@@ -433,3 +433,4 @@ class MongoDBSource(Source):
 
     def close(self):
         self.mongo_client.close()
+        super().close()

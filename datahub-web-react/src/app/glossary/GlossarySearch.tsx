@@ -70,6 +70,7 @@ function GlossarySearch() {
                     initialQuery={query || ''}
                     placeholderText="Search Glossary"
                     suggestions={[]}
+                    hideRecommendations
                     style={{
                         padding: 12,
                         paddingBottom: 5,
@@ -88,7 +89,7 @@ function GlossarySearch() {
                         {searchResults.map((result) => {
                             return (
                                 <SearchResult
-                                    to={`/${entityRegistry.getPathName(result.entity.type)}/${result.entity.urn}`}
+                                    to={`${entityRegistry.getEntityUrl(result.entity.type, result.entity.urn)}`}
                                     onClick={() => setIsSearchBarFocused(false)}
                                 >
                                     <IconWrapper>
