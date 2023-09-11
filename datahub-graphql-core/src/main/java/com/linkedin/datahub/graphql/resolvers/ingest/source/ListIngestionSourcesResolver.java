@@ -11,11 +11,14 @@ import com.linkedin.datahub.graphql.resolvers.ingest.IngestionResolverUtils;
 import com.linkedin.entity.EntityResponse;
 import com.linkedin.entity.client.EntityClient;
 import com.linkedin.metadata.Constants;
+import com.linkedin.metadata.query.SearchFlags;
 import com.linkedin.metadata.search.SearchEntity;
 import com.linkedin.metadata.search.SearchResult;
 import graphql.schema.DataFetcher;
 import graphql.schema.DataFetchingEnvironment;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -58,7 +61,8 @@ public class ListIngestionSourcesResolver implements DataFetcher<CompletableFutu
               Collections.emptyMap(),
               start,
               count,
-              context.getAuthentication());
+              context.getAuthentication(),
+              new SearchFlags().setFulltext(true));
 
           // Then, resolve all ingestion sources
           final Map<Urn, EntityResponse> entities = _entityClient.batchGetV2(
@@ -66,15 +70,20 @@ public class ListIngestionSourcesResolver implements DataFetcher<CompletableFutu
               new HashSet<>(gmsResult.getEntities().stream()
                   .map(SearchEntity::getEntity)
                   .collect(Collectors.toList())),
-              ImmutableSet.of(Constants.INGESTION_INFO_ASPECT_NAME),
+              ImmutableSet.of(Constants.INGESTION_INFO_ASPECT_NAME, Constants.INGESTION_SOURCE_KEY_ASPECT_NAME),
               context.getAuthentication());
+
+          final Collection<EntityResponse> sortedEntities = entities.values()
+              .stream()
+              .sorted(Comparator.comparingLong(s -> -s.getAspects().get(Constants.INGESTION_SOURCE_KEY_ASPECT_NAME).getCreated().getTime()))
+              .collect(Collectors.toList());
 
           // Now that we have entities we can bind this to a result.
           final ListIngestionSourcesResult result = new ListIngestionSourcesResult();
           result.setStart(gmsResult.getFrom());
           result.setCount(gmsResult.getPageSize());
           result.setTotal(gmsResult.getNumEntities());
-          result.setIngestionSources(IngestionResolverUtils.mapIngestionSources(entities.values()));
+          result.setIngestionSources(IngestionResolverUtils.mapIngestionSources(sortedEntities));
           return result;
 
         } catch (Exception e) {

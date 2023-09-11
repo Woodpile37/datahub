@@ -1,6 +1,6 @@
-from typing import List, Set
+from typing import List, Optional
 
-from datahub.metadata.schema_classes import FabricTypeClass
+from datahub.configuration.source_common import ALL_ENV_TYPES
 from datahub.utilities.urns.error import InvalidUrnError
 from datahub.utilities.urns.urn import Urn
 
@@ -12,13 +12,6 @@ class DataFlowUrn(Urn):
     """
 
     ENTITY_TYPE: str = "dataFlow"
-    VALID_FABRIC_SET: Set[str] = set(
-        [
-            str(getattr(FabricTypeClass, attr)).upper()
-            for attr in dir(FabricTypeClass)
-            if not callable(getattr(FabricTypeClass, attr)) and not attr.startswith("_")
-        ]
-    )
 
     def __init__(
         self, entity_type: str, entity_id: List[str], domain: str = Urn.LI_DOMAIN
@@ -56,13 +49,21 @@ class DataFlowUrn(Urn):
 
     @classmethod
     def create_from_ids(
-        cls, orchestrator: str, flow_id: str, env: str
+        cls,
+        orchestrator: str,
+        flow_id: str,
+        env: str,
+        platform_instance: Optional[str] = None,
     ) -> "DataFlowUrn":
-        entity_id: List[str] = [
-            orchestrator,
-            flow_id,
-            env,
-        ]
+        entity_id: List[str]
+        if platform_instance:
+            entity_id = [
+                orchestrator,
+                f"{platform_instance}.{flow_id}",
+                env,
+            ]
+        else:
+            entity_id = [orchestrator, flow_id, env]
         return cls(DataFlowUrn.ENTITY_TYPE, entity_id)
 
     @staticmethod
@@ -81,7 +82,7 @@ class DataFlowUrn(Urn):
             )
 
         env = entity_id[2].upper()
-        if env not in DataFlowUrn.VALID_FABRIC_SET:
+        if env not in ALL_ENV_TYPES:
             raise InvalidUrnError(
-                f"Invalid env:{env}. Allowed evn are {DataFlowUrn.VALID_FABRIC_SET}"
+                f"Invalid env:{env}. Allowed envs are {ALL_ENV_TYPES}"
             )

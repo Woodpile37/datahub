@@ -1,13 +1,21 @@
 import React from 'react';
-import { Divider, List } from 'antd';
+import { Divider, List, Checkbox } from 'antd';
 import styled from 'styled-components';
-import { Entity } from '../../../../types.generated';
+import { Entity, EntityPath } from '../../../../types.generated';
 import { useEntityRegistry } from '../../../useEntityRegistry';
 import DefaultPreviewCard from '../../../preview/DefaultPreviewCard';
 import { IconStyleType } from '../../../entity/Entity';
-import { capitalizeFirstLetter } from '../../../shared/textUtil';
+import { EntityAndType } from '../../../entity/shared/types';
+import { getPlatformName } from '../../../entity/shared/utils';
+import { capitalizeFirstLetterOnly } from '../../../shared/textUtil';
+
+const StyledCheckbox = styled(Checkbox)`
+    margin-right: 12px;
+`;
 
 const StyledList = styled(List)`
+    overflow-y: auto;
+    height: 100%;
     margin-top: -1px;
     box-shadow: ${(props) => props.theme.styles['box-shadow']};
     flex: 1;
@@ -37,11 +45,13 @@ const StyledList = styled(List)`
     }
 ` as typeof List;
 
-const ListItem = styled.div`
+const ListItem = styled.div<{ isSelectMode: boolean }>`
     padding-right: 40px;
-    padding-left: 40px;
+    padding-left: ${(props) => (props.isSelectMode ? '20px' : '40px')};
     padding-top: 16px;
     padding-bottom: 8px;
+    display: flex;
+    align-items: center;
 `;
 
 const ThinDivider = styled(Divider)`
@@ -51,6 +61,7 @@ const ThinDivider = styled(Divider)`
 
 type AdditionalProperties = {
     degree?: number;
+    paths?: EntityPath[];
 };
 
 type Props = {
@@ -60,10 +71,24 @@ type Props = {
     additionalPropertiesList?: Array<AdditionalProperties>;
     entities: Array<Entity>;
     onClick?: (index: number) => void;
+    isSelectMode?: boolean;
+    selectedEntities?: EntityAndType[];
+    setSelectedEntities?: (entities: EntityAndType[]) => any;
+    bordered?: boolean;
 };
 
-export const EntityNameList = ({ additionalPropertiesList, entities, onClick }: Props) => {
+export const EntityNameList = ({
+    additionalPropertiesList,
+    entities,
+    onClick,
+    isSelectMode,
+    selectedEntities = [],
+    setSelectedEntities,
+    bordered = true,
+}: Props) => {
     const entityRegistry = useEntityRegistry();
+    const selectedEntityUrns = selectedEntities?.map((entity) => entity.urn) || [];
+
     if (
         additionalPropertiesList?.length !== undefined &&
         additionalPropertiesList.length > 0 &&
@@ -74,40 +99,62 @@ export const EntityNameList = ({ additionalPropertiesList, entities, onClick }: 
             { additionalPropertiesList, entities },
         );
     }
+
+    /**
+     * Invoked when a new entity is selected. Simply updates the state of the list of selected entities.
+     */
+    const onSelectEntity = (selectedEntity: EntityAndType, selected: boolean) => {
+        if (selected) {
+            setSelectedEntities?.([...selectedEntities, selectedEntity]);
+        } else {
+            setSelectedEntities?.(selectedEntities?.filter((entity) => entity.urn !== selectedEntity.urn) || []);
+        }
+    };
+
     return (
         <StyledList
-            bordered
+            bordered={bordered}
             dataSource={entities}
             renderItem={(entity, index) => {
                 const additionalProperties = additionalPropertiesList?.[index];
                 const genericProps = entityRegistry.getGenericEntityProperties(entity.type, entity);
                 const platformLogoUrl = genericProps?.platform?.properties?.logoUrl;
-                const platformName =
-                    genericProps?.platform?.properties?.displayName ||
-                    capitalizeFirstLetter(genericProps?.platform?.name);
+                const platformName = getPlatformName(genericProps);
                 const entityTypeName = entityRegistry.getEntityName(entity.type);
                 const displayName = entityRegistry.getDisplayName(entity.type, entity);
                 const url = entityRegistry.getEntityUrl(entity.type, entity.urn);
                 const fallbackIcon = entityRegistry.getIcon(entity.type, 18, IconStyleType.ACCENT);
-                const subType = genericProps?.subTypes?.typeNames?.length && genericProps?.subTypes?.typeNames[0];
+                const subType = capitalizeFirstLetterOnly(genericProps?.subTypes?.typeNames?.[0]);
                 const entityCount = genericProps?.entityCount;
+                const deprecation = genericProps?.deprecation;
                 return (
                     <>
-                        <ListItem>
+                        <ListItem isSelectMode={isSelectMode || false}>
+                            {isSelectMode && (
+                                <StyledCheckbox
+                                    checked={selectedEntityUrns.indexOf(entity.urn) >= 0}
+                                    onChange={(e) =>
+                                        onSelectEntity({ urn: entity.urn, type: entity.type }, e.target.checked)
+                                    }
+                                />
+                            )}
                             <DefaultPreviewCard
                                 name={displayName}
+                                urn={entity.urn}
                                 logoUrl={platformLogoUrl || undefined}
                                 logoComponent={fallbackIcon}
                                 url={url}
-                                platform={platformName || undefined}
+                                platform={platformName}
                                 type={subType || entityTypeName}
                                 titleSizePx={14}
                                 tags={genericProps?.globalTags || undefined}
                                 glossaryTerms={genericProps?.glossaryTerms || undefined}
-                                domain={genericProps?.domain}
+                                domain={genericProps?.domain?.domain}
                                 onClick={() => onClick?.(index)}
                                 entityCount={entityCount}
                                 degree={additionalProperties?.degree}
+                                deprecation={deprecation}
+                                paths={additionalProperties?.paths}
                             />
                         </ListItem>
                         <ThinDivider />

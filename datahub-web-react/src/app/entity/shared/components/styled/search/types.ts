@@ -1,5 +1,6 @@
 import {
     Entity,
+    FacetFilterInput,
     FacetMetadata,
     MatchedField,
     Maybe,
@@ -7,6 +8,7 @@ import {
     SearchAcrossEntitiesInput,
     SearchInsight,
 } from '../../../../../../types.generated';
+import { UnionType } from '../../../../../search/utils/constants';
 
 export type GetSearchResultsParams = {
     variables: {
@@ -34,4 +36,24 @@ export type SearchResultsInterface = {
     searchResults: Array<SearchResultInterface>;
     /** Candidate facet aggregations used for search filtering */
     facets?: Maybe<Array<FacetMetadata>>;
+};
+
+/**
+ * Supported Action Groups for search-select feature.
+ */
+export enum SelectActionGroups {
+    CHANGE_OWNERS,
+    CHANGE_TAGS,
+    CHANGE_GLOSSARY_TERMS,
+    CHANGE_DOMAINS,
+    CHANGE_DEPRECATION,
+    DELETE,
+}
+
+/**
+ * A fixed set of Filters, joined in conjunction or disjunction.
+ */
+export type FilterSet = {
+    unionType: UnionType;
+    filters: FacetFilterInput[];
 };

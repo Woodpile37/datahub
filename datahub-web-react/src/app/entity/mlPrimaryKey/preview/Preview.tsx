@@ -3,6 +3,7 @@ import { DataPlatform, EntityType, Owner } from '../../../../types.generated';
 import DefaultPreviewCard from '../../../preview/DefaultPreviewCard';
 import { capitalizeFirstLetterOnly } from '../../../shared/textUtil';
 import { useEntityRegistry } from '../../../useEntityRegistry';
+import { IconStyleType } from '../../Entity';
 
 export const Preview = ({
     urn,
@@ -26,10 +27,14 @@ export const Preview = ({
         <DefaultPreviewCard
             url={entityRegistry.getEntityUrl(EntityType.MlprimaryKey, urn)}
             name={name}
+            urn={urn}
             description={description || ''}
-            platform={capitalizeFirstLetterOnly(platform?.properties?.displayName) || featureNamespace}
+            platform={
+                platform?.properties?.displayName || capitalizeFirstLetterOnly(platform?.name) || featureNamespace
+            }
             logoUrl={platform?.properties?.logoUrl || ''}
-            type="MLPrimaryKey"
+            type="ML Primary Key"
+            typeIcon={entityRegistry.getIcon(EntityType.MlprimaryKey, 14, IconStyleType.ACCENT)}
             owners={owners}
             platformInstanceId={platformInstanceId}
         />

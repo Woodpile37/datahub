@@ -6,10 +6,10 @@ import re
 import sys
 import textwrap
 from importlib.metadata import metadata, requires
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import click
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic.dataclasses import dataclass
 
 from datahub.configuration.common import ConfigModel
@@ -18,58 +18,141 @@ from datahub.ingestion.api.decorators import (
     SourceCapability,
     SupportStatus,
 )
-from datahub.ingestion.api.registry import PluginRegistry
-from datahub.ingestion.api.source import Source
+from datahub.ingestion.source.source_registry import source_registry
+from datahub.metadata.schema_classes import SchemaFieldClass
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class FieldRow:
+class FieldRow(BaseModel):
     path: str
+    parent: Optional[str]
     type_name: str
     required: bool
     default: str
     description: str
     inner_fields: List["FieldRow"] = Field(default_factory=list)
+    discriminated_type: Optional[str] = None
+
+    class Component(BaseModel):
+        type: str
+        field_name: Optional[str]
+
+    # matches any [...] style section inside a field path
+    _V2_FIELD_PATH_TOKEN_MATCHER = r"\[[\w.]*[=]*[\w\(\-\ \_\).]*\][\.]*"
+    # matches a .?[...] style section inside a field path anchored to the beginning
+    _V2_FIELD_PATH_TOKEN_MATCHER_PREFIX = rf"^[\.]*{_V2_FIELD_PATH_TOKEN_MATCHER}"
+    _V2_FIELD_PATH_FIELD_NAME_MATCHER = r"^\w+"
 
     @staticmethod
-    def get_checkbox(enabled: bool) -> str:
-        return "✅" if enabled else ""
+    def map_field_path_to_components(field_path: str) -> List[Component]:
+        
+        m = re.match(FieldRow._V2_FIELD_PATH_TOKEN_MATCHER_PREFIX, field_path)
+        v = re.match(FieldRow._V2_FIELD_PATH_FIELD_NAME_MATCHER, field_path)
+        components: List[FieldRow.Component] = []
+        while m or v:
+            token = m.group() if m else v.group() # type: ignore
+            if v:
+                if components:
+                    if components[-1].field_name is None:
+                        components[-1].field_name = token
+                    else:
+                        components.append(FieldRow.Component(type="non_map_type", field_name=token))
+                else:
+                    components.append(FieldRow.Component(type="non_map_type", field_name=token))
+            
+            if m:
+                if token.startswith("[version="):
+                    pass
+                elif "[type=" in token:
+                    type_match = re.match(r"[\.]*\[type=(.*)\]", token)
+                    if type_match:
+                        type_string = type_match.group(1)
+                        if components and components[-1].type == "map":
+                            if components[-1].field_name is None:
+                                pass
+                            else:
+                                new_component = FieldRow.Component(type="map_key", field_name="`key`")
+                                components.append(new_component)
+                                new_component = FieldRow.Component(type=type_string, field_name=None)
+                                components.append(new_component)
+                        if type_string == "map":
+                            new_component = FieldRow.Component(type=type_string, field_name=None)
+                            components.append(new_component)
+
+            field_path = field_path[m.span()[1]:] if m else field_path[v.span()[1]:] # type: ignore
+            m = re.match(FieldRow._V2_FIELD_PATH_TOKEN_MATCHER_PREFIX, field_path)
+            v = re.match(FieldRow._V2_FIELD_PATH_FIELD_NAME_MATCHER, field_path)
+
+        return components
+
+    @staticmethod
+    def field_path_to_components(field_path: str) -> List[str]:
+        '''
+        Inverts the field_path v2 format to get the canonical field path
+        [version=2.0].[type=x].foo.[type=string(format=uri)].bar => ["foo","bar"]
+        '''
+        if "type=map" not in field_path:
+            return re.sub(FieldRow._V2_FIELD_PATH_TOKEN_MATCHER,"",field_path).split(".")
+        else:
+            # fields with maps in them need special handling to insert the `key` fragment
+            return [c.field_name for c in FieldRow.map_field_path_to_components(field_path) if c.field_name]
+
+    @classmethod
+    def from_schema_field(cls, schema_field: SchemaFieldClass) -> "FieldRow":
+        path_components = FieldRow.field_path_to_components(schema_field.fieldPath)
+
+        parent = path_components[-2] if len(path_components) >= 2 else None
+        if parent == "`key`":
+            # the real parent node is one index above
+            parent = path_components[-3]
+        json_props = json.loads(schema_field.jsonProps) if schema_field.jsonProps else {}
+        default_value = str(json_props.get("default")) or ""
+        return FieldRow(path=".".join(path_components), parent=parent, type_name=str(schema_field.nativeDataType), required=not schema_field.nullable, default=default_value, description=schema_field.description, inner_fields=[]
+                        ,discriminated_type=schema_field.nativeDataType)
+
+    def get_checkbox(self) -> str:
+        if self.required:
+            if not self.parent:  # None and empty string both count
+                return "[✅]"
+            else:
+                return f"[❓ (required if {self.parent} is set)]"
+        else:
+            return ""
 
     def to_md_line(self) -> str:
-        return (
-            f"| {self.path} | {self.get_checkbox(self.required)} | {self.type_name} | {self.description} | {self.default} |\n"
-            + "".join([inner_field.to_md_line() for inner_field in self.inner_fields])
-        )
+        if self.inner_fields:
+            if len(self.inner_fields) ==1:
+                type_name = self.inner_fields[0].type_name or self.type_name
+            else:
+                type_name = "UnionType (See notes for variants)"
+        else:
+            type_name = self.type_name
+
+        description = self.description.replace("\n", " ") # descriptions with newlines in them break markdown rendering
+
+        if self.inner_fields and len(self.inner_fields) > 1:
+            # to deal with unions that have essentially the same simple field path, we include the supported types in the Notes section
+            # Once we move to a better layout, we can expand this section out
+            notes = "One of " + ",".join([x.type_name for x in self.inner_fields if x.discriminated_type])
+        else:
+            notes = " "
+
+        md_line = f"| {self.path} {self.get_checkbox()} | {type_name} | {description} | {self.default} | {notes} |\n"
+        return md_line
 
 
 class FieldHeader(FieldRow):
     def to_md_line(self) -> str:
         return "\n".join(
             [
-                "| Field | Required | Type | Description | Default |",
-                "| ---   | ---      | ---  | --- | -- |",
+                "| Field [Required] | Type | Description | Default | Notes |",
+                "| ---   | ---  | --- | -- | -- |",
                 "",
             ]
         )
 
     def __init__(self):
         pass
-
-
-def get_definition_dict_from_definition(
-    definitions_dict: Dict[str, Any], definition_name: str
-) -> Dict[str, Any]:
-    import re
-
-    m = re.search("#/definitions/(.*)$", definition_name)
-    if m:
-        definition_term: str = m.group(1)
-        definition_dict = definitions_dict[definition_term]
-        return definition_dict
-
-    raise Exception("Failed to find a definition for " + definition_name)
 
 
 def get_prefixed_name(field_prefix: Optional[str], field_name: Optional[str]) -> str:
@@ -84,247 +167,112 @@ def get_prefixed_name(field_prefix: Optional[str], field_name: Optional[str]) ->
         else field_prefix
     )
 
+def custom_comparator(path: str) -> str:
+        '''
+        Projects a string onto a separate space
+        Low_prio string will start with Z else start with A
+        Number of field paths will add the second set of letters: 00 - 99
+        
+        '''
+        opt1 = path
+        prio_value = priority_value(opt1)
+        projection = f"{prio_value}"
+        projection = f"{projection}{opt1}"
+        return projection
+
+class FieldTree:
+    '''
+    A helper class that re-constructs the tree hierarchy of schema fields
+    to help sort fields by importance while keeping nesting intact
+    '''
+
+    def __init__(self, field: Optional[FieldRow] = None):
+        self.field = field
+        self.fields: Dict[str, "FieldTree"] = {}
+
+    def add_field(self, row: FieldRow, path: Optional[str] = None) -> "FieldTree":
+        # logger.warn(f"Add field: path:{path}, row:{row}")
+        #breakpoint()
+        if self.field and self.field.path == row.path:
+            #breakpoint()
+            # we have an incoming field with the same path as us, this is probably a union variant
+            # attach to existing field
+            self.field.inner_fields.append(row)
+        else:
+            path = path if path is not None else row.path
+            top_level_field = path.split(".")[0]
+            if top_level_field == "":
+                breakpoint()
+            if top_level_field in self.fields:
+                self.fields[top_level_field].add_field(row, ".".join(path.split(".")[1:]))
+            else:
+                self.fields[top_level_field] = FieldTree(field=row)
+        # logger.warn(f"{self}")
+        return self
+
+    def sort(self):
+        # Required fields before optionals
+        required_fields = {k: v for k, v in self.fields.items() if v.field and v.field.required}
+        optional_fields = {k: v for k, v in self.fields.items() if v.field and not v.field.required}
+
+        self.sorted_fields = []
+        for field_map in [required_fields, optional_fields]:
+            # Top-level fields before fields with nesting
+            self.sorted_fields.extend(sorted([f for f,val in field_map.items() if val.fields == {}], key=custom_comparator))
+            self.sorted_fields.extend(sorted([f for f,val in field_map.items() if val.fields != {}], key=custom_comparator))
+            
+        for field_tree in self.fields.values():
+            field_tree.sort()
+
+    def get_fields(self) -> Iterable[FieldRow]:
+        if self.field:
+            yield self.field
+        for key in self.sorted_fields:
+            yield from self.fields[key].get_fields()
+        
+    def __repr__(self) -> str:
+        result = {}
+        if self.field:
+            result["_self"] = json.loads(json.dumps(self.field.dict()))
+        for f in self.fields:
+            result[f] = json.loads(str(self.fields[f]))
+        return json.dumps(result, indent=2)
+
+def priority_value(path: str) -> str:
+    # A map of low value tokens to their relative importance
+    low_value_token_map = {
+        "env": "X",
+        "profiling": "Y",
+        "stateful_ingestion": "Z"
+    }
+    tokens = path.split(".")
+    for low_value_token in low_value_token_map:
+        if low_value_token in tokens:
+            return low_value_token_map[low_value_token]
+
+    # everything else high-prio
+    return "A"
+    
 
 def gen_md_table_from_struct(schema_dict: Dict[str, Any]) -> List[str]:
-    table_md_str: List[FieldRow] = []
-    # table_md_str = [
-    #    "<table>\n<tr>\n<td>\nField\n</td>Type<td>Default</td><td>Description</td></tr>\n"
-    # ]
-    gen_md_table(schema_dict, schema_dict.get("definitions", {}), md_str=table_md_str)
-    # table_md_str.append("\n</table>\n")
+    
 
-    table_md_str = [field for field in table_md_str if len(field.inner_fields) == 0] + [
-        field for field in table_md_str if len(field.inner_fields) > 0
-    ]
+    from datahub.ingestion.extractor.json_schema_util import JsonSchemaTranslator
+    # we don't want default field values to be injected into the description of the field
+    JsonSchemaTranslator._INJECT_DEFAULTS_INTO_DESCRIPTION = False
+    schema_fields = list(JsonSchemaTranslator.get_fields_from_schema(schema_dict))
+    result: List[str] = [FieldHeader().to_md_line()]    
 
-    # table_md_str.sort(key=lambda x: "z" if len(x.inner_fields) else "" + x.path)
-    return (
-        [FieldHeader().to_md_line()]
-        + [row.to_md_line() for row in table_md_str]
-        + ["\n"]
-    )
+    field_tree = FieldTree(field=None)
+    for field in schema_fields:
+        row: FieldRow = FieldRow.from_schema_field(field)
+        field_tree.add_field(row)
 
+    field_tree.sort()
 
-def get_enum_description(
-    authored_description: Optional[str], enum_symbols: List[str]
-) -> str:
-    description = authored_description or ""
-    missed_symbols = [symbol for symbol in enum_symbols if symbol not in description]
-    if missed_symbols:
-        description = (
-            description + "."
-            if description
-            else "" + " Allowed symbols are " + ",".join(enum_symbols)
-        )
-
-    return description
-
-
-def gen_md_table(
-    field_dict: Dict[str, Any],
-    definitions_dict: Dict[str, Any],
-    md_str: List[FieldRow],
-    field_prefix: str = None,
-) -> None:
-    if "enum" in field_dict:
-        md_str.append(
-            FieldRow(
-                path=get_prefixed_name(field_prefix, None),
-                type_name="Enum",
-                required=field_dict.get("required") or False,
-                description=f"one of {','.join(field_dict['enum'])}",
-                default=str(field_dict.get("default", "None")),
-            )
-        )
-        # md_str.append(
-        #    f"| {get_prefixed_name(field_prefix, None)} | Enum | {field_dict['type']} | one of {','.join(field_dict['enum'])} |\n"
-        # )
-
-    elif "properties" in field_dict:
-        for field_name, value in field_dict["properties"].items():
-            required_field: bool = field_name in field_dict.get("required", [])
-
-            if "allOf" in value:
-                for sub_schema in value["allOf"]:
-                    reference = sub_schema["$ref"]
-                    def_dict = get_definition_dict_from_definition(
-                        definitions_dict, reference
-                    )
-                    # special case for enum reference, we don't split up the rows
-                    if "enum" in def_dict:
-                        row = FieldRow(
-                            path=get_prefixed_name(field_prefix, field_name),
-                            type_name=f"enum({reference.split('/')[-1]})",
-                            description=get_enum_description(
-                                value.get("description"), def_dict["enum"]
-                            ),
-                            default=str(value.get("default", "")),
-                            required=required_field,
-                        )
-                        md_str.append(row)
-                    else:
-                        # object reference
-                        row = FieldRow(
-                            path=get_prefixed_name(field_prefix, field_name),
-                            type_name=f"{reference.split('/')[-1]} (see below for fields)",
-                            description=value.get("description") or "",
-                            default=str(value.get("default", "")),
-                            required=required_field,
-                        )
-                        md_str.append(row)
-                        # md_str.append(
-                        #    f"| {get_prefixed_name(field_prefix, field_name)} | {reference.split('/')[-1]} (see below for fields) | {value.get('description') or ''} | {value.get('default') or ''} | \n"
-                        # )
-                        gen_md_table(
-                            def_dict,
-                            definitions_dict,
-                            field_prefix=get_prefixed_name(field_prefix, field_name),
-                            md_str=row.inner_fields,
-                        )
-            elif "type" in value and value["type"] == "enum":
-                # enum
-                enum_definition = value["allOf"][0]["$ref"]
-                def_dict = get_definition_dict_from_definition(
-                    definitions_dict, enum_definition
-                )
-                print(value)
-                print(def_dict)
-                md_str.append(
-                    FieldRow(
-                        path=get_prefixed_name(field_prefix, field_name),
-                        type_name="Enum",
-                        description=f"one of {','.join(def_dict['enum'])}",
-                        required=required_field,
-                        default=str(value.get("default", "None")),
-                    )
-                    #                    f"| {get_prefixed_name(field_prefix, field_name)} | Enum | one of {','.join(def_dict['enum'])} | {def_dict['type']} | \n"
-                )
-
-            elif "type" in value and value["type"] == "object":
-                # struct
-                if "$ref" not in value:
-                    if (
-                        "additionalProperties" in value
-                        and "$ref" in value["additionalProperties"]
-                    ):
-                        # breakpoint()
-                        value_ref = value["additionalProperties"]["$ref"]
-                        def_dict = get_definition_dict_from_definition(
-                            definitions_dict, value_ref
-                        )
-
-                        row = FieldRow(
-                            path=get_prefixed_name(field_prefix, field_name),
-                            type_name=f"Dict[str, {value_ref.split('/')[-1]}]",
-                            description=value.get("description") or "",
-                            default=str(value.get("default", "")),
-                            required=required_field,
-                        )
-                        md_str.append(row)
-                        gen_md_table(
-                            def_dict,
-                            definitions_dict,
-                            field_prefix=get_prefixed_name(
-                                field_prefix, f"{field_name}.`key`"
-                            ),
-                            md_str=row.inner_fields,
-                        )
-                    else:
-                        value_type = value.get("additionalProperties", {}).get("type")
-                        md_str.append(
-                            FieldRow(
-                                path=get_prefixed_name(field_prefix, field_name),
-                                type_name=f"Dict[str,{value_type}]"
-                                if value_type
-                                else "Dict",
-                                description=value.get("description") or "",
-                                default=str(value.get("default", "")),
-                                required=required_field,
-                            )
-                        )
-                else:
-                    object_definition = value["$ref"]
-                    row = FieldRow(
-                        path=get_prefixed_name(field_prefix, field_name),
-                        type_name=f"{object_definition.split('/')[-1]} (see below for fields)",
-                        description=value.get("description") or "",
-                        default=str(value.get("default", "")),
-                        required=required_field,
-                    )
-
-                    md_str.append(
-                        row
-                        # f"| {get_prefixed_name(field_prefix, field_name)} | {object_definition.split('/')[-1]} (see below for fields) | {value.get('description') or ''} | {value.get('default') or ''} | \n"
-                    )
-                    def_dict = get_definition_dict_from_definition(
-                        definitions_dict, object_definition
-                    )
-                    gen_md_table(
-                        def_dict,
-                        definitions_dict,
-                        field_prefix=get_prefixed_name(field_prefix, field_name),
-                        md_str=row.inner_fields,
-                    )
-            elif "type" in value and value["type"] == "array":
-                # array
-                items_type = value["items"].get("type", "object")
-                md_str.append(
-                    FieldRow(
-                        path=get_prefixed_name(field_prefix, field_name),
-                        type_name=f"Array of {items_type}",
-                        description=value.get("description") or "",
-                        default=str(value.get("default", "None")),
-                        required=required_field,
-                    )
-                    #                    f"| {get_prefixed_name(field_prefix, field_name)} | Array of {items_type} | {value.get('description') or ''} | {value.get('default')} |  \n"
-                )
-                # TODO: Array of structs
-            elif "type" in value:
-                md_str.append(
-                    FieldRow(
-                        path=get_prefixed_name(field_prefix, field_name),
-                        type_name=value["type"],
-                        description=value.get("description") or "",
-                        default=str(value.get("default", "None")),
-                        required=required_field,
-                    )
-                    # f"| {get_prefixed_name(field_prefix, field_name)} | {value['type']} | {value.get('description') or ''} | {value.get('default')} | \n"
-                )
-            elif "$ref" in value:
-                object_definition = value["$ref"]
-                def_dict = get_definition_dict_from_definition(
-                    definitions_dict, object_definition
-                )
-                row = FieldRow(
-                    path=get_prefixed_name(field_prefix, field_name),
-                    type_name=f"{object_definition.split('/')[-1]} (see below for fields)",
-                    description=value.get("description") or "",
-                    default=str(value.get("default", "")),
-                    required=required_field,
-                )
-
-                md_str.append(
-                    row
-                    #    f"| {get_prefixed_name(field_prefix, field_name)} | {object_definition.split('/')[-1]} (see below for fields) | {value.get('description') or ''} | {value.get('default') or ''} | \n"
-                )
-                gen_md_table(
-                    def_dict,
-                    definitions_dict,
-                    field_prefix=get_prefixed_name(field_prefix, field_name),
-                    md_str=row.inner_fields,
-                )
-            else:
-                # print(md_str, field_prefix, field_name, value)
-                md_str.append(
-                    FieldRow(
-                        path=get_prefixed_name(field_prefix, field_name),
-                        type_name="Generic dict",
-                        description=value.get("description", ""),
-                        default=str(value.get("default", "None")),
-                        required=required_field,
-                    )
-                    # f"| {get_prefixed_name(field_prefix, field_name)} | Any dict | {value.get('description') or ''} | {value.get('default')} |\n"
-                )
+    for row in field_tree.get_fields():
+        result.append(row.to_md_line())
+    return result
 
 
 def get_snippet(long_string: str, max_length: int = 100) -> str:
@@ -359,7 +307,7 @@ def get_capability_text(src_capability: SourceCapability) -> str:
     Returns markdown format cell text for a capability, hyperlinked to capability feature page if known
     """
     capability_docs_mapping: Dict[SourceCapability, str] = {
-        SourceCapability.DELETION_DETECTION: "../../../../metadata-ingestion/docs/dev_guides/stateful.md#removal-of-stale-tables-and-views",
+        SourceCapability.DELETION_DETECTION: "../../../../metadata-ingestion/docs/dev_guides/stateful.md#stale-entity-removal",
         SourceCapability.DOMAINS: "../../../domains.md",
         SourceCapability.PLATFORM_INSTANCE: "../../../platform-instances.md",
         SourceCapability.DATA_PROFILING: "../../../../metadata-ingestion/docs/dev_guides/sql_profiles.md",
@@ -399,7 +347,7 @@ def get_additional_deps_for_extra(extra_name: str) -> List[str]:
     base_deps = set([x.split(";")[0] for x in all_requirements if "extra ==" not in x])
     # filter for dependencies for this extra
     extra_deps = set(
-        [x.split(";")[0] for x in all_requirements if f'extra == "{extra_name}"' in x]
+        [x.split(";")[0] for x in all_requirements if f"extra == '{extra_name}'" in x]
     )
     # calculate additional deps that this extra adds
     delta_deps = extra_deps - base_deps
@@ -462,7 +410,6 @@ def generate(
 
     if extra_docs:
         for path in glob.glob(f"{extra_docs}/**/*[.md|.yaml|.yml]", recursive=True):
-            # breakpoint()
 
             m = re.search("/docs/sources/(.*)/(.*).md", path)
             if m:
@@ -487,11 +434,37 @@ def generate(
                             final_markdown,
                         )
                     else:
-                        create_or_update(
-                            source_documentation,
-                            [platform_name, "plugins", file_name, "custom_docs"],
-                            final_markdown,
-                        )
+                        if "_" in file_name:
+                            plugin_doc_parts = file_name.split("_")
+                            if len(plugin_doc_parts) != 2 or plugin_doc_parts[
+                                1
+                            ] not in ["pre", "post"]:
+                                raise Exception(
+                                    f"{file_name} needs to be of the form <plugin>_pre.md or <plugin>_post.md"
+                                )
+
+                            docs_key_name = f"custom_docs_{plugin_doc_parts[1]}"
+                            create_or_update(
+                                source_documentation,
+                                [
+                                    platform_name,
+                                    "plugins",
+                                    plugin_doc_parts[0],
+                                    docs_key_name,
+                                ],
+                                final_markdown,
+                            )
+                        else:
+                            create_or_update(
+                                source_documentation,
+                                [
+                                    platform_name,
+                                    "plugins",
+                                    file_name,
+                                    "custom_docs_post",
+                                ],
+                                final_markdown,
+                            )
             else:
                 yml_match = re.search("/docs/sources/(.*)/(.*)_recipe.yml", path)
                 if yml_match:
@@ -505,15 +478,11 @@ def generate(
                             file_contents,
                         )
 
-    source_registry = PluginRegistry[Source]()
-    source_registry.register_from_entrypoint("datahub.ingestion.source.plugins")
-
-    # This source is always enabled
-    for plugin_name in sorted(source_registry._mapping.keys()):
+    for plugin_name in sorted(source_registry.mapping.keys()):
         if source and source != plugin_name:
             continue
 
-        metrics["plugins"]["discovered"] = metrics["plugins"]["discovered"] + 1
+        metrics["plugins"]["discovered"] = metrics["plugins"]["discovered"] + 1 # type: ignore
         # We want to attempt to load all plugins before printing a summary.
         source_type = None
         try:
@@ -531,9 +500,10 @@ def generate(
                 get_additional_deps_for_extra(extra_plugin) if extra_plugin else []
             )
         except Exception as e:
-            print(f"Failed to process {plugin_name} due to exception")
-            print(repr(e))
-            metrics["plugins"]["failed"] = metrics["plugins"].get("failed", 0) + 1
+            logger.warning(
+                f"Failed to process {plugin_name} due to exception {e}", exc_info=e
+            )
+            metrics["plugins"]["failed"] = metrics["plugins"].get("failed", 0) + 1 #type: ignore
 
         if source_type and hasattr(source_type, "get_config_class"):
             try:
@@ -552,10 +522,17 @@ def generate(
                 if hasattr(source_type, "get_platform_id"):
                     platform_id = source_type.get_platform_id()
 
+                if hasattr(source_type, "get_platform_doc_order"):
+                    platform_doc_order = source_type.get_platform_doc_order()
+                    create_or_update(
+                        source_documentation,
+                        [platform_id, "plugins", plugin_name, "doc_order"],
+                        platform_doc_order,
+                    )
+
                 source_documentation[platform_id] = (
                     source_documentation.get(platform_id) or {}
                 )
-                # breakpoint()
 
                 create_or_update(
                     source_documentation,
@@ -605,9 +582,10 @@ def generate(
                 os.makedirs(config_dir, exist_ok=True)
                 with open(f"{config_dir}/{plugin_name}_config.json", "w") as f:
                     f.write(source_config_class.schema_json(indent=2))
-                
-                create_or_update(source_documentation,
-                                    [platform_id, "plugins", plugin_name, "config_schema"],
+
+                create_or_update(
+                    source_documentation,
+                    [platform_id, "plugins", plugin_name, "config_schema"],
                     source_config_class.schema_json(indent=2) or "",
                 )
 
@@ -634,23 +612,34 @@ def generate(
     sources_dir = f"{out_dir}/sources"
     os.makedirs(sources_dir, exist_ok=True)
 
-    for platform_id, platform_docs in source_documentation.items():
+    i = 0
+    for platform_id, platform_docs in sorted(
+        source_documentation.items(),
+        key=lambda x: (x[1]["name"].casefold(), x[1]["name"])
+        if "name" in x[1]
+        else (x[0].casefold(), x[0]),
+    ):
         if source and platform_id != source:
             continue
         metrics["source_platforms"]["discovered"] = (
-            metrics["source_platforms"]["discovered"] + 1
+            metrics["source_platforms"]["discovered"] + 1 # type: ignore
         )
         platform_doc_file = f"{sources_dir}/{platform_id}.md"
         if "name" not in platform_docs:
             # We seem to have discovered written docs that corresponds to a platform, but haven't found linkage to it from the source classes
             warning_msg = f"Failed to find source classes for platform {platform_id}. Did you remember to annotate your source class with @platform_name({platform_id})?"
             logger.error(warning_msg)
-            metrics["source_platforms"]["warnings"].append(warning_msg)
+            metrics["source_platforms"]["warnings"].append(warning_msg) # type: ignore
+            continue
 
         with open(platform_doc_file, "w") as f:
-            if "name" in platform_docs:
-                f.write(f"import Tabs from '@theme/Tabs';\nimport TabItem from '@theme/TabItem';\n\n")
-                f.write(f"# {platform_docs['name']}\n")
+            i += 1
+            f.write(f"---\nsidebar_position: {i}\n---\n\n")
+            f.write(
+                f"import Tabs from '@theme/Tabs';\nimport TabItem from '@theme/TabItem';\n\n"
+            )
+            f.write(f"# {platform_docs['name']}\n")
+
             if len(platform_docs["plugins"].keys()) > 1:
                 # More than one plugin used to provide integration with this platform
                 f.write(
@@ -665,7 +654,12 @@ def generate(
 
                 #                f.write("| Source Module | Documentation |\n")
                 #                f.write("| ------ | ---- |\n")
-                for plugin in sorted(platform_docs["plugins"]):
+                for plugin, plugin_docs in sorted(
+                    platform_docs["plugins"].items(),
+                    key=lambda x: str(x[1].get("doc_order"))
+                    if x[1].get("doc_order")
+                    else x[0],
+                ):
                     f.write("<tr>\n")
                     f.write(f"<td>\n\n`{plugin}`\n\n</td>\n")
                     f.write(
@@ -678,8 +672,14 @@ def generate(
                 f.write("</table>\n\n")
             # insert platform level custom docs before plugin section
             f.write(platform_docs.get("custom_docs") or "")
-            for plugin in sorted(platform_docs["plugins"]):
-                plugin_docs = platform_docs["plugins"][plugin]
+            # all_plugins = platform_docs["plugins"].keys()
+
+            for plugin, plugin_docs in sorted(
+                platform_docs["plugins"].items(),
+                key=lambda x: str(x[1].get("doc_order"))
+                if x[1].get("doc_order")
+                else x[0],
+            ):
                 f.write(f"\n\n## Module `{plugin}`\n")
                 if "support_status" in plugin_docs:
                     f.write(
@@ -699,8 +699,11 @@ def generate(
                     f.write("\n")
 
                 f.write(f"{plugin_docs.get('source_doc') or ''}\n")
+                # Insert custom pre section
+                f.write(plugin_docs.get("custom_docs_pre", ""))
+                f.write("\n### CLI based Ingestion\n")
                 if "extra_deps" in plugin_docs:
-                    f.write("### Install the Plugin\n")
+                    f.write("\n#### Install the Plugin\n")
                     if plugin_docs["extra_deps"] != []:
                         f.write("```shell\n")
                         f.write(f"pip install 'acryl-datahub[{plugin}]'\n")
@@ -710,20 +713,22 @@ def generate(
                             f"The `{plugin}` source works out of the box with `acryl-datahub`.\n"
                         )
                 if "recipe" in plugin_docs:
-                    f.write("\n### Quickstart Recipe\n")
+                    f.write("\n### Starter Recipe\n")
                     f.write(
                         "Check out the following recipe to get started with ingestion! See [below](#config-details) for full configuration options.\n\n\n"
                     )
                     f.write(
-                        "For general pointers on writing and running a recipe, see our [main recipe guide](../../../../metadata-ingestion/README.md#recipes)\n"
+                        "For general pointers on writing and running a recipe, see our [main recipe guide](../../../../metadata-ingestion/README.md#recipes).\n"
                     )
                     f.write("```yaml\n")
                     f.write(plugin_docs["recipe"])
                     f.write("\n```\n")
                 if "config" in plugin_docs:
                     f.write("\n### Config Details\n")
-                    f.write("""<Tabs>
-                <TabItem value="options" label="Options" default>\n\n""")
+                    f.write(
+                        """<Tabs>
+                <TabItem value="options" label="Options" default>\n\n"""
+                    )
                     f.write(
                         "Note that a `.` is used to denote nested fields in the YAML recipe.\n\n"
                     )
@@ -733,7 +738,8 @@ def generate(
                     for doc in plugin_docs["config"]:
                         f.write(doc)
                     f.write("\n</details>\n\n")
-                    f.write(f"""</TabItem>
+                    f.write(
+                        f"""</TabItem>
 <TabItem value="schema" label="Schema">
 
 The [JSONSchema](https://json-schema.org/) for this configuration is inlined below.\n\n
@@ -741,9 +747,10 @@ The [JSONSchema](https://json-schema.org/) for this configuration is inlined bel
 {plugin_docs['config_schema']}
 ```\n\n
 </TabItem>
-</Tabs>\n\n""")
+</Tabs>\n\n"""
+                    )
                 # insert custom plugin docs after config details
-                f.write(plugin_docs.get("custom_docs", ""))
+                f.write(plugin_docs.get("custom_docs_post", ""))
                 if "classname" in plugin_docs:
                     f.write("\n### Code Coordinates\n")
                     f.write(f"- Class Name: `{plugin_docs['classname']}`\n")
@@ -751,20 +758,20 @@ The [JSONSchema](https://json-schema.org/) for this configuration is inlined bel
                         f.write(
                             f"- Browse on [GitHub](../../../../metadata-ingestion/{plugin_docs['filename']})\n\n"
                         )
-                metrics["plugins"]["generated"] = metrics["plugins"]["generated"] + 1
+                metrics["plugins"]["generated"] = metrics["plugins"]["generated"] + 1  #type: ignore
 
             f.write("\n## Questions\n")
             f.write(
                 f"If you've got any questions on configuring ingestion for {platform_docs.get('name',platform_id)}, feel free to ping us on [our Slack](https://slack.datahubproject.io)\n"
             )
             metrics["source_platforms"]["generated"] = (
-                metrics["source_platforms"]["generated"] + 1
+                metrics["source_platforms"]["generated"] + 1 # type: ignore
             )
     print("Ingestion Documentation Generation Complete")
     print("############################################")
     print(json.dumps(metrics, indent=2))
     print("############################################")
-    if metrics["plugins"].get("failed", 0) > 0:
+    if metrics["plugins"].get("failed", 0) > 0: #type: ignore
         sys.exit(1)
 
 

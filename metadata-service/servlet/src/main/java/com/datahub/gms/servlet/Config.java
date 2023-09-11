@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
+import java.time.ZoneId;
 import javax.servlet.ServletContext;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -30,6 +31,8 @@ public class Config extends HttpServlet {
     put("noCode", "true");
     put("retention", "true");
     put("statefulIngestionCapable", true);
+    put("patchCapable", true);
+    put("timeZone", ZoneId.systemDefault().toString());
   }};
   ObjectMapper objectMapper = new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL);
 

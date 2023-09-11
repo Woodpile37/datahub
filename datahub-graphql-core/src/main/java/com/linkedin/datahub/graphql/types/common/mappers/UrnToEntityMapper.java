@@ -8,6 +8,9 @@ import com.linkedin.datahub.graphql.generated.CorpGroup;
 import com.linkedin.datahub.graphql.generated.CorpUser;
 import com.linkedin.datahub.graphql.generated.Dashboard;
 import com.linkedin.datahub.graphql.generated.DataFlow;
+import com.linkedin.datahub.graphql.generated.DataHubPolicy;
+import com.linkedin.datahub.graphql.generated.DataHubRole;
+import com.linkedin.datahub.graphql.generated.DataHubView;
 import com.linkedin.datahub.graphql.generated.DataJob;
 import com.linkedin.datahub.graphql.generated.DataPlatform;
 import com.linkedin.datahub.graphql.generated.DataPlatformInstance;
@@ -23,10 +26,13 @@ import com.linkedin.datahub.graphql.generated.MLModel;
 import com.linkedin.datahub.graphql.generated.MLModelGroup;
 import com.linkedin.datahub.graphql.generated.MLPrimaryKey;
 import com.linkedin.datahub.graphql.generated.Notebook;
+import com.linkedin.datahub.graphql.generated.SchemaFieldEntity;
 import com.linkedin.datahub.graphql.generated.Tag;
 import com.linkedin.datahub.graphql.generated.Test;
 import com.linkedin.datahub.graphql.types.mappers.ModelMapper;
 import javax.annotation.Nonnull;
+
+import static com.linkedin.metadata.Constants.*;
 
 
 public class UrnToEntityMapper implements ModelMapper<com.linkedin.common.urn.Urn, Entity>  {
@@ -146,8 +152,28 @@ public class UrnToEntityMapper implements ModelMapper<com.linkedin.common.urn.Ur
     }
     if (input.getEntityType().equals("test")) {
       partialEntity = new Test();
-      ((Assertion) partialEntity).setUrn(input.toString());
-      ((Assertion) partialEntity).setType(EntityType.TEST);
+      ((Test) partialEntity).setUrn(input.toString());
+      ((Test) partialEntity).setType(EntityType.TEST);
+    }
+    if (input.getEntityType().equals(DATAHUB_ROLE_ENTITY_NAME)) {
+      partialEntity = new DataHubRole();
+      ((DataHubRole) partialEntity).setUrn(input.toString());
+      ((DataHubRole) partialEntity).setType(EntityType.DATAHUB_ROLE);
+    }
+    if (input.getEntityType().equals(POLICY_ENTITY_NAME)) {
+      partialEntity = new DataHubPolicy();
+      ((DataHubPolicy) partialEntity).setUrn(input.toString());
+      ((DataHubPolicy) partialEntity).setType(EntityType.DATAHUB_POLICY);
+    }
+    if (input.getEntityType().equals(SCHEMA_FIELD_ENTITY_NAME)) {
+      partialEntity = new SchemaFieldEntity();
+      ((SchemaFieldEntity) partialEntity).setUrn(input.toString());
+      ((SchemaFieldEntity) partialEntity).setType(EntityType.SCHEMA_FIELD);
+    }
+    if (input.getEntityType().equals(DATAHUB_VIEW_ENTITY_NAME)) {
+      partialEntity = new DataHubView();
+      ((DataHubView) partialEntity).setUrn(input.toString());
+      ((DataHubView) partialEntity).setType(EntityType.DATAHUB_VIEW);
     }
     return partialEntity;
   }

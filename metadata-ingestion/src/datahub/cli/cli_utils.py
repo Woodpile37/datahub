@@ -10,52 +10,15 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 import click
 import requests
 import yaml
-from avrogen.dict_wrapper import DictWrapper
 from pydantic import BaseModel, ValidationError
 from requests.models import Response
 from requests.sessions import Session
 
-from datahub.emitter.mce_builder import Aspect
-from datahub.emitter.rest_emitter import _make_curl_command
+from datahub.emitter.aspect import ASPECT_MAP, TIMESERIES_ASPECT_MAP
+from datahub.emitter.request_helper import make_curl_command
 from datahub.emitter.serialization_helper import post_json_transform
-from datahub.metadata.schema_classes import (
-    AssertionRunEventClass,
-    BrowsePathsClass,
-    ChartInfoClass,
-    ChartKeyClass,
-    ContainerClass,
-    ContainerKeyClass,
-    ContainerPropertiesClass,
-    DatahubIngestionCheckpointClass,
-    DatahubIngestionRunSummaryClass,
-    DataJobInputOutputClass,
-    DataJobKeyClass,
-    DataPlatformInstanceClass,
-    DataProcessInfoClass,
-    DatasetDeprecationClass,
-    DatasetKeyClass,
-    DatasetProfileClass,
-    DatasetPropertiesClass,
-    DatasetUpstreamLineageClass,
-    DatasetUsageStatisticsClass,
-    EditableDatasetPropertiesClass,
-    EditableSchemaMetadataClass,
-    GlobalTagsClass,
-    GlossaryTermsClass,
-    InstitutionalMemoryClass,
-    MLFeatureKeyClass,
-    MLFeaturePropertiesClass,
-    MLPrimaryKeyKeyClass,
-    MLPrimaryKeyPropertiesClass,
-    OperationClass,
-    OwnershipClass,
-    SchemaMetadataClass,
-    StatusClass,
-    SubTypesClass,
-    UpstreamLineageClass,
-    ViewPropertiesClass,
-)
-from datahub.utilities.urns.urn import Urn
+from datahub.metadata.schema_classes import _Aspect
+from datahub.utilities.urns.urn import Urn, guess_entity_type
 
 log = logging.getLogger(__name__)
 
@@ -63,11 +26,22 @@ DEFAULT_GMS_HOST = "http://localhost:8080"
 CONDENSED_DATAHUB_CONFIG_PATH = "~/.datahubenv"
 DATAHUB_CONFIG_PATH = os.path.expanduser(CONDENSED_DATAHUB_CONFIG_PATH)
 
+DATAHUB_ROOT_FOLDER = os.path.expanduser("~/.datahub")
+
 ENV_SKIP_CONFIG = "DATAHUB_SKIP_CONFIG"
+ENV_METADATA_HOST_URL = "DATAHUB_GMS_URL"
 ENV_METADATA_HOST = "DATAHUB_GMS_HOST"
+ENV_METADATA_PORT = "DATAHUB_GMS_PORT"
+ENV_METADATA_PROTOCOL = "DATAHUB_GMS_PROTOCOL"
 ENV_METADATA_TOKEN = "DATAHUB_GMS_TOKEN"
+ENV_DATAHUB_SYSTEM_CLIENT_ID = "DATAHUB_SYSTEM_CLIENT_ID"
+ENV_DATAHUB_SYSTEM_CLIENT_SECRET = "DATAHUB_SYSTEM_CLIENT_SECRET"
 
 config_override: Dict = {}
+
+# TODO: Many of the methods in this file duplicate logic that already lives
+# in the DataHubGraph client. We should refactor this to use the client instead.
+# For the methods that aren't duplicates, that logic should be moved to the client.
 
 
 class GmsConfig(BaseModel):
@@ -79,27 +53,51 @@ class DatahubConfig(BaseModel):
     gms: GmsConfig
 
 
-def set_env_variables_override_config(host: str, token: Optional[str]) -> None:
+def get_boolean_env_variable(key: str, default: bool = False) -> bool:
+    value = os.environ.get(key)
+    if value is None:
+        return default
+    elif value.lower() in ("true", "1"):
+        return True
+    else:
+        return False
+
+
+def set_env_variables_override_config(url: str, token: Optional[str]) -> None:
     """Should be used to override the config when using rest emitter"""
-    config_override[ENV_METADATA_HOST] = host
+    config_override[ENV_METADATA_HOST_URL] = url
     if token is not None:
         config_override[ENV_METADATA_TOKEN] = token
 
 
-def write_datahub_config(host: str, token: Optional[str]) -> None:
-    config = {
-        "gms": {
-            "server": host,
-            "token": token,
-        }
-    }
+def persist_datahub_config(config: dict) -> None:
     with open(DATAHUB_CONFIG_PATH, "w+") as outfile:
         yaml.dump(config, outfile, default_flow_style=False)
     return None
 
 
+def write_gms_config(
+    host: str, token: Optional[str], merge_with_previous: bool = True
+) -> None:
+    config = DatahubConfig(gms=GmsConfig(server=host, token=token))
+    if merge_with_previous:
+        try:
+            previous_config = get_client_config(as_dict=True)
+            assert isinstance(previous_config, dict)
+        except Exception as e:
+            # ok to fail on this
+            previous_config = {}
+            log.debug(
+                f"Failed to retrieve config from file {DATAHUB_CONFIG_PATH}: {e}. This isn't fatal."
+            )
+        config_dict = {**previous_config, **config.dict()}
+    else:
+        config_dict = config.dict()
+    persist_datahub_config(config_dict)
+
+
 def should_skip_config() -> bool:
-    return os.getenv(ENV_SKIP_CONFIG, False) == "True"
+    return get_boolean_env_variable(ENV_SKIP_CONFIG, False)
 
 
 def ensure_datahub_config() -> None:
@@ -108,49 +106,76 @@ def ensure_datahub_config() -> None:
             f"No {CONDENSED_DATAHUB_CONFIG_PATH} file found, generating one for you...",
             bold=True,
         )
-        write_datahub_config(DEFAULT_GMS_HOST, None)
+        write_gms_config(DEFAULT_GMS_HOST, None)
 
 
-def get_details_from_config():
+def get_client_config(as_dict: bool = False) -> Union[Optional[DatahubConfig], dict]:
     with open(DATAHUB_CONFIG_PATH, "r") as stream:
         try:
             config_json = yaml.safe_load(stream)
+            if as_dict:
+                return config_json
             try:
-                datahub_config = DatahubConfig(**config_json)
+                datahub_config = DatahubConfig.parse_obj(config_json)
+                return datahub_config
             except ValidationError as e:
                 click.echo(
                     f"Received error, please check your {CONDENSED_DATAHUB_CONFIG_PATH}"
                 )
                 click.echo(e, err=True)
                 sys.exit(1)
-
-            gms_config = datahub_config.gms
-
-            gms_host = gms_config.server
-            gms_token = gms_config.token
-            return gms_host, gms_token
         except yaml.YAMLError as exc:
-            click.secho(f"{DATAHUB_CONFIG_PATH} malformatted, error: {exc}", bold=True)
-    return None, None
+            click.secho(f"{DATAHUB_CONFIG_PATH} malformed, error: {exc}", bold=True)
+            return None
+
+
+def get_details_from_config():
+    datahub_config = get_client_config(as_dict=False)
+    assert isinstance(datahub_config, DatahubConfig)
+    if datahub_config is not None:
+        gms_config = datahub_config.gms
+
+        gms_host = gms_config.server
+        gms_token = gms_config.token
+        return gms_host, gms_token
+    else:
+        return None, None
 
 
 def get_details_from_env() -> Tuple[Optional[str], Optional[str]]:
-    return os.environ.get(ENV_METADATA_HOST), os.environ.get(ENV_METADATA_TOKEN)
+    host = os.environ.get(ENV_METADATA_HOST)
+    port = os.environ.get(ENV_METADATA_PORT)
+    token = os.environ.get(ENV_METADATA_TOKEN)
+    protocol = os.environ.get(ENV_METADATA_PROTOCOL, "http")
+    url = os.environ.get(ENV_METADATA_HOST_URL)
+    if port is not None:
+        url = f"{protocol}://{host}:{port}"
+        return url, token
+    # The reason for using host as URL is backward compatibility
+    # If port is not being used we assume someone is using host env var as URL
+    if url is None and host is not None:
+        log.warning(
+            f"Do not use {ENV_METADATA_HOST} as URL. Use {ENV_METADATA_HOST_URL} instead"
+        )
+    return url or host, token
 
 
 def first_non_null(ls: List[Optional[str]]) -> Optional[str]:
     return next((el for el in ls if el is not None and el.strip() != ""), None)
 
 
-def guess_entity_type(urn: str) -> str:
-    assert urn.startswith("urn:li:"), "urns must start with urn:li:"
-    return urn.split(":")[2]
+def get_system_auth() -> Optional[str]:
+    system_client_id = os.environ.get(ENV_DATAHUB_SYSTEM_CLIENT_ID)
+    system_client_secret = os.environ.get(ENV_DATAHUB_SYSTEM_CLIENT_SECRET)
+    if system_client_id is not None and system_client_secret is not None:
+        return f"Basic {system_client_id}:{system_client_secret}"
+    return None
 
 
-def get_host_and_token():
+def get_url_and_token():
     gms_host_env, gms_token_env = get_details_from_env()
     if len(config_override.keys()) > 0:
-        gms_host = config_override.get(ENV_METADATA_HOST)
+        gms_host = config_override.get(ENV_METADATA_HOST_URL)
         gms_token = config_override.get(ENV_METADATA_TOKEN)
     elif should_skip_config():
         gms_host = gms_host_env
@@ -164,17 +189,17 @@ def get_host_and_token():
 
 
 def get_token():
-    return get_host_and_token()[1]
+    return get_url_and_token()[1]
 
 
 def get_session_and_host():
     session = requests.Session()
 
-    gms_host, gms_token = get_host_and_token()
+    gms_host, gms_token = get_url_and_token()
 
     if gms_host is None or gms_host.strip() == "":
         log.error(
-            f"GMS Host is not set. Use datahub init command or set {ENV_METADATA_HOST} env var"
+            f"GMS Host is not set. Use datahub init command or set {ENV_METADATA_HOST_URL} env var"
         )
         return None, None
 
@@ -194,13 +219,13 @@ def get_session_and_host():
 
 def test_connection():
     (session, host) = get_session_and_host()
-    url = host + "/config"
+    url = f"{host}/config"
     response = session.get(url)
     response.raise_for_status()
 
 
 def test_connectivity_complain_exit(operation_name: str) -> None:
-    """Test connectivty to metadata-service, log operation name and exit"""
+    """Test connectivity to metadata-service, log operation name and exit"""
     # First test connectivity
     try:
         test_connection()
@@ -297,10 +322,7 @@ def post_delete_references_endpoint(
     path: str,
     cached_session_host: Optional[Tuple[Session, str]] = None,
 ) -> Tuple[int, List[Dict]]:
-    if not cached_session_host:
-        session, gms_host = get_session_and_host()
-    else:
-        session, gms_host = cached_session_host
+    session, gms_host = cached_session_host or get_session_and_host()
     url = gms_host + path
 
     payload = json.dumps(payload_obj)
@@ -315,11 +337,8 @@ def post_delete_endpoint(
     payload_obj: dict,
     path: str,
     cached_session_host: Optional[Tuple[Session, str]] = None,
-) -> typing.Tuple[str, int]:
-    if not cached_session_host:
-        session, gms_host = get_session_and_host()
-    else:
-        session, gms_host = cached_session_host
+) -> typing.Tuple[str, int, int]:
+    session, gms_host = cached_session_host or get_session_and_host()
     url = gms_host + path
 
     return post_delete_endpoint_with_session_and_url(session, url, payload_obj)
@@ -329,24 +348,26 @@ def post_delete_endpoint_with_session_and_url(
     session: Session,
     url: str,
     payload_obj: dict,
-) -> typing.Tuple[str, int]:
+) -> typing.Tuple[str, int, int]:
     payload = json.dumps(payload_obj)
 
     response = session.post(url, payload)
 
     summary = parse_run_restli_response(response)
-    urn = summary.get("urn", "")
-    rows_affected = summary.get("rows", 0)
+    urn: str = summary.get("urn", "")
+    rows_affected: int = summary.get("rows", 0)
+    timeseries_rows_affected: int = summary.get("timeseriesRows", 0)
 
-    return urn, rows_affected
+    return urn, rows_affected, timeseries_rows_affected
 
 
 def get_urns_by_filter(
     platform: Optional[str],
-    env: Optional[str],
+    env: Optional[str] = None,
     entity_type: str = "dataset",
     search_query: str = "*",
     include_removed: bool = False,
+    only_soft_deleted: Optional[bool] = None,
 ) -> Iterable[str]:
     session, gms_host = get_session_and_host()
     endpoint: str = "/entities?action=search"
@@ -364,14 +385,12 @@ def get_urns_by_filter(
     ):
         filter_criteria.append(
             {
-                "field": "platform",
+                "field": "platform.keyword",
                 "value": f"urn:li:dataPlatform:{platform}",
                 "condition": "EQUAL",
             }
         )
-    if platform is not None and (
-        entity_type_lower == "chart" or entity_type_lower == "dashboard"
-    ):
+    if platform is not None and entity_type_lower in {"chart", "dashboard"}:
         filter_criteria.append(
             {
                 "field": "tool",
@@ -380,7 +399,15 @@ def get_urns_by_filter(
             }
         )
 
-    if include_removed:
+    if only_soft_deleted:
+        filter_criteria.append(
+            {
+                "field": "removed",
+                "value": "true",
+                "condition": "EQUAL",
+            }
+        )
+    elif include_removed:
         filter_criteria.append(
             {
                 "field": "removed",
@@ -408,9 +435,10 @@ def get_urns_by_filter(
             entities_yielded += 1
             log.debug(f"yielding {x['entity']}")
             yield x["entity"]
-        assert (
-            entities_yielded == num_entities
-        ), "Did not delete all entities, try running this command again!"
+        if entities_yielded != num_entities:
+            log.warning(
+                f"Discrepancy in entities yielded {entities_yielded} and num entities {num_entities}. This means all entities may not have been deleted."
+            )
     else:
         log.error(f"Failed to execute search query with {str(response.content)}")
         response.raise_for_status()
@@ -479,10 +507,7 @@ def batch_get_ids(
     session, gms_host = get_session_and_host()
     endpoint: str = "/entitiesV2"
     url = gms_host + endpoint
-    ids_to_get = []
-    for id in ids:
-        ids_to_get.append(Urn.url_encode(id))
-
+    ids_to_get = [Urn.url_encode(id) for id in ids]
     response = session.get(
         f"{url}?ids=List({','.join(ids_to_get)})",
     )
@@ -539,11 +564,7 @@ def get_entity(
     aspect: Optional[List] = None,
     cached_session_host: Optional[Tuple[Session, str]] = None,
 ) -> Dict:
-    if not cached_session_host:
-        session, gms_host = get_session_and_host()
-    else:
-        session, gms_host = cached_session_host
-
+    session, gms_host = cached_session_host or get_session_and_host()
     if urn.startswith("urn%3A"):
         # we assume the urn is already encoded
         encoded_urn: str = urn
@@ -556,7 +577,7 @@ def get_entity(
     endpoint: str = f"/entitiesV2/{encoded_urn}"
 
     if aspect and len(aspect):
-        endpoint = endpoint + "?aspects=List(" + ",".join(aspect) + ")"
+        endpoint = f"{endpoint}?aspects=List(" + ",".join(aspect) + ")"
 
     response = session.get(gms_host + endpoint)
     response.raise_for_status()
@@ -569,12 +590,9 @@ def post_entity(
     aspect_name: str,
     aspect_value: Dict,
     cached_session_host: Optional[Tuple[Session, str]] = None,
-) -> Dict:
-    if not cached_session_host:
-        session, gms_host = get_session_and_host()
-    else:
-        session, gms_host = cached_session_host
-
+    is_async: Optional[str] = "false",
+) -> int:
+    session, gms_host = cached_session_host or get_session_and_host()
     endpoint: str = "/aspects/?action=ingestProposal"
 
     proposal = {
@@ -587,83 +605,28 @@ def post_entity(
                 "contentType": "application/json",
                 "value": json.dumps(aspect_value),
             },
-        }
+        },
+        "async": is_async,
     }
     payload = json.dumps(proposal)
     url = gms_host + endpoint
-    curl_command = _make_curl_command(session, "POST", url, payload)
+    curl_command = make_curl_command(session, "POST", url, payload)
     log.debug(
         "Attempting to emit to DataHub GMS; using curl equivalent to:\n%s",
         curl_command,
     )
     response = session.post(url, payload)
+    if not response.ok:
+        try:
+            log.info(response.json()["message"].strip())
+        except Exception:
+            log.info(f"post_entity failed: {response.text}")
     response.raise_for_status()
     return response.status_code
 
 
-type_class_to_name_map = {
-    DatasetKeyClass: "datasetKey",
-    UpstreamLineageClass: "upstreamLineage",
-    DataJobKeyClass: "datajobKey",
-    DataJobInputOutputClass: "dataJobInputOutput",
-    SchemaMetadataClass: "schemaMetadata",
-    MLPrimaryKeyKeyClass: "mlPrimaryKey",
-    MLPrimaryKeyPropertiesClass: "mlPrimaryKeyProperties",
-    MLFeatureKeyClass: "mlFeatureKey",
-    MLFeaturePropertiesClass: "mlFeatureProperties",
-    InstitutionalMemoryClass: "institutionalMemory",
-    OwnershipClass: "ownership",
-    BrowsePathsClass: "browsePaths",
-    DataPlatformInstanceClass: "dataPlatformInstance",
-    GlobalTagsClass: "globalTags",
-    StatusClass: "status",
-    DatasetPropertiesClass: "datasetProperties",
-    GlossaryTermsClass: "glossaryTerms",
-    SubTypesClass: "subTypes",
-    EditableSchemaMetadataClass: "editableSchemaMetadata",
-    ViewPropertiesClass: "viewProperties",
-    EditableDatasetPropertiesClass: "editableDatasetProperties",
-    DatasetDeprecationClass: "datasetDeprecation",
-    DatasetUpstreamLineageClass: "datasetUpstreamLineage",
-    ChartInfoClass: "chartInfo",
-    DataProcessInfoClass: "dataProcessInfo",
-    ChartKeyClass: "chartKey",
-    ContainerClass: "container",
-    ContainerKeyClass: "containerKey",
-    ContainerPropertiesClass: "containerProperties",
-}
-
-timeseries_class_to_aspect_name_map: Dict[Type, str] = {
-    DatahubIngestionCheckpointClass: "datahubIngestionCheckpoint",
-    DatahubIngestionRunSummaryClass: "datahubIngestionRunSummary",
-    DatasetUsageStatisticsClass: "datasetUsageStatistics",
-    DatasetProfileClass: "datasetProfile",
-    AssertionRunEventClass: "assertionRunEvent",
-    OperationClass: "operation",
-}
-
-
-def _get_pydantic_class_from_aspect_name(aspect_name: str) -> Optional[Type[Aspect]]:
-    candidates = [k for (k, v) in type_class_to_name_map.items() if v == aspect_name]
-    candidates.extend(
-        [
-            k
-            for (k, v) in timeseries_class_to_aspect_name_map.items()
-            if v == aspect_name
-        ]
-    )
-    return candidates[0] if candidates else None
-
-
-def _get_aspect_name_from_aspect_class(aspect_class: str) -> str:
-    class_to_name_map = {
-        k.RECORD_SCHEMA.fullname.replace("pegasus2avro.", ""): v  # type: ignore
-        for (k, v) in (
-            set(type_class_to_name_map.items())
-            | set(timeseries_class_to_aspect_name_map.items())
-        )
-    }
-    return class_to_name_map.get(aspect_class, "unknown")
+def _get_pydantic_class_from_aspect_name(aspect_name: str) -> Optional[Type[_Aspect]]:
+    return ASPECT_MAP.get(aspect_name)
 
 
 def get_latest_timeseries_aspect_values(
@@ -671,10 +634,7 @@ def get_latest_timeseries_aspect_values(
     timeseries_aspect_name: str,
     cached_session_host: Optional[Tuple[Session, str]],
 ) -> Dict:
-    if not cached_session_host:
-        session, gms_host = get_session_and_host()
-    else:
-        session, gms_host = cached_session_host
+    session, gms_host = cached_session_host or get_session_and_host()
     query_body = {
         "urn": entity_urn,
         "entity": guess_entity_type(entity_urn),
@@ -696,22 +656,18 @@ def get_aspects_for_entity(
     aspects: List[str] = [],
     typed: bool = False,
     cached_session_host: Optional[Tuple[Session, str]] = None,
-) -> Dict[str, Union[dict, DictWrapper]]:
+) -> Dict[str, Union[dict, _Aspect]]:
     # Process non-timeseries aspects
-    non_timeseries_aspects: List[str] = [
-        a for a in aspects if a not in timeseries_class_to_aspect_name_map.values()
-    ]
+    non_timeseries_aspects = [a for a in aspects if a not in TIMESERIES_ASPECT_MAP]
     entity_response = get_entity(
         entity_urn, non_timeseries_aspects, cached_session_host
     )
     aspect_list: Dict[str, dict] = entity_response["aspects"]
 
     # Process timeseries aspects & append to aspect_list
-    timeseries_aspects: List[str] = [
-        a for a in aspects if a in timeseries_class_to_aspect_name_map.values()
-    ]
+    timeseries_aspects: List[str] = [a for a in aspects if a in TIMESERIES_ASPECT_MAP]
     for timeseries_aspect in timeseries_aspects:
-        timeseries_response = get_latest_timeseries_aspect_values(
+        timeseries_response: Dict = get_latest_timeseries_aspect_values(
             entity_urn, timeseries_aspect, cached_session_host
         )
         values: List[Dict] = timeseries_response.get("value", {}).get("values", [])
@@ -720,28 +676,16 @@ def get_aspects_for_entity(
                 timeseries_aspect
             )
             if aspect_cls is not None:
-                aspect_value = values[0]
+                ts_aspect = values[0]["aspect"]
                 # Decode the json-encoded generic aspect value.
-                aspect_value["aspect"]["value"] = json.loads(
-                    aspect_value["aspect"]["value"]
-                )
-                aspect_list.update(
-                    # Follow the convention used for non-timeseries aspects.
-                    {
-                        aspect_cls.RECORD_SCHEMA.fullname.replace(
-                            "pegasus2avro.", ""
-                        ): aspect_value
-                    }
-                )
+                ts_aspect["value"] = json.loads(ts_aspect["value"])
+                aspect_list[timeseries_aspect] = ts_aspect
 
-    aspect_map: Dict[str, Union[dict, DictWrapper]] = {}
-    for a in aspect_list.values():
-        aspect_name = a["name"]
+    aspect_map: Dict[str, Union[dict, _Aspect]] = {}
+    for aspect_name, a in aspect_list.items():
         aspect_py_class: Optional[Type[Any]] = _get_pydantic_class_from_aspect_name(
             aspect_name
         )
-        if aspect_name == "unknown":
-            print(f"Failed to find aspect_name for class {aspect_name}")
 
         aspect_dict = a["value"]
         if not typed:
@@ -752,8 +696,32 @@ def get_aspects_for_entity(
                 aspect_map[aspect_name] = aspect_py_class.from_obj(post_json_obj)
             except Exception as e:
                 log.error(f"Error on {json.dumps(aspect_dict)}", e)
+        else:
+            log.debug(f"Failed to find class for aspect {aspect_name}")
 
     if aspects:
         return {k: v for (k, v) in aspect_map.items() if k in aspects}
     else:
-        return {k: v for (k, v) in aspect_map.items()}
+        return dict(aspect_map)
+
+
+def make_shim_command(name: str, suggestion: str) -> click.Command:
+    @click.command(
+        name=name,
+        context_settings=dict(
+            ignore_unknown_options=True,
+            allow_extra_args=True,
+        ),
+    )
+    @click.pass_context
+    def command(ctx: click.Context) -> None:
+        """<disabled due to missing dependencies>"""
+
+        click.secho(
+            "This command is disabled due to missing dependencies. "
+            f"Please {suggestion} to enable it.",
+            fg="red",
+        )
+        ctx.exit(1)
+
+    return command

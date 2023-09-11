@@ -2,6 +2,7 @@ import React from 'react';
 import { EntityType, Owner, SearchInsight } from '../../../../types.generated';
 import DefaultPreviewCard from '../../../preview/DefaultPreviewCard';
 import { useEntityRegistry } from '../../../useEntityRegistry';
+import { IconStyleType } from '../../Entity';
 
 export const Preview = ({
     urn,
@@ -25,8 +26,10 @@ export const Preview = ({
         <DefaultPreviewCard
             url={entityRegistry.getEntityUrl(EntityType.Domain, urn)}
             name={name || ''}
+            urn={urn}
             description={description || ''}
             type="Domain"
+            typeIcon={entityRegistry.getIcon(EntityType.Domain, 14, IconStyleType.ACCENT)}
             owners={owners}
             insights={insights}
             logoComponent={logoComponent}

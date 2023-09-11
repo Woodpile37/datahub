@@ -38,7 +38,6 @@ def loaded_hive(hive_runner):
 
 
 def base_pipeline_config(events_file):
-
     return {
         "run_id": "hive-test",
         "source": {
@@ -55,7 +54,7 @@ def base_pipeline_config(events_file):
 
 
 @freeze_time(FROZEN_TIME)
-@pytest.mark.integration
+@pytest.mark.integration_batch_1
 def test_hive_ingest(
     loaded_hive, pytestconfig, test_resources_dir, tmp_path, mock_time
 ):
@@ -85,7 +84,7 @@ def test_hive_ingest(
 
 
 @freeze_time(FROZEN_TIME)
-@pytest.mark.integration
+@pytest.mark.integration_batch_1
 def test_hive_instance_check(loaded_hive, test_resources_dir, tmp_path, pytestconfig):
     instance: str = "production_warehouse"
 

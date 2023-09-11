@@ -3,14 +3,14 @@ package com.linkedin.datahub.graphql.resolvers.timeline;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.datahub.graphql.generated.GetSchemaBlameInput;
 import com.linkedin.datahub.graphql.generated.GetSchemaBlameResult;
-import com.linkedin.datahub.graphql.types.timeline.mappers.SchemaFieldBlameMapper;
+import com.linkedin.datahub.graphql.types.timeline.mappers.SchemaBlameMapper;
 import com.linkedin.metadata.timeline.TimelineService;
 import com.linkedin.metadata.timeline.data.ChangeCategory;
 import com.linkedin.metadata.timeline.data.ChangeTransaction;
 import graphql.schema.DataFetcher;
 import graphql.schema.DataFetchingEnvironment;
 import java.net.URISyntaxException;
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -21,6 +21,7 @@ import static com.linkedin.datahub.graphql.resolvers.ResolverUtils.*;
 
 /*
 Returns the most recent changes made to each column in a dataset at each dataset version.
+TODO: Add tests for this resolver.
  */
 @Slf4j
 public class GetSchemaBlameResolver implements DataFetcher<CompletableFuture<GetSchemaBlameResult>> {
@@ -41,12 +42,18 @@ public class GetSchemaBlameResolver implements DataFetcher<CompletableFuture<Get
 
     return CompletableFuture.supplyAsync(() -> {
       try {
-        final Set<ChangeCategory> changeCategorySet = new HashSet<>();
-        changeCategorySet.add(ChangeCategory.TECHNICAL_SCHEMA);
-        Urn datasetUrn = Urn.createFromString(datasetUrnString);
-        List<ChangeTransaction> changeTransactionList =
-            _timelineService.getTimeline(datasetUrn, changeCategorySet, startTime, endTime, null, null, false);
-        return SchemaFieldBlameMapper.map(changeTransactionList, version);
+        final Set<ChangeCategory> changeCategorySet = Collections.singleton(ChangeCategory.TECHNICAL_SCHEMA);
+        final Urn datasetUrn = Urn.createFromString(datasetUrnString);
+        final List<ChangeTransaction> changeTransactionList =
+            _timelineService.getTimeline(
+                datasetUrn,
+                changeCategorySet,
+                startTime,
+                endTime,
+                null,
+                null,
+                false);
+        return SchemaBlameMapper.map(changeTransactionList, version);
       } catch (URISyntaxException u) {
         log.error(
             String.format("Failed to list schema blame data, likely due to the Urn %s being invalid", datasetUrnString),

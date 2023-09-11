@@ -20,6 +20,8 @@ import com.linkedin.metadata.utils.GenericRecordUtils;
 import com.linkedin.mxe.MetadataChangeProposal;
 import graphql.schema.DataFetcher;
 import graphql.schema.DataFetchingEnvironment;
+import lombok.extern.slf4j.Slf4j;
+
 import java.net.URISyntaxException;
 import java.util.Optional;
 import java.util.UUID;
@@ -31,6 +33,7 @@ import static com.linkedin.datahub.graphql.resolvers.ResolverUtils.*;
 /**
  * Creates or updates an ingestion source. Requires the MANAGE_INGESTION privilege.
  */
+@Slf4j
 public class UpsertIngestionSourceResolver implements DataFetcher<CompletableFuture<String>> {
 
   private final EntityClient _entityClient;
@@ -103,12 +106,16 @@ public class UpsertIngestionSourceResolver implements DataFetcher<CompletableFut
 
   private DataHubIngestionSourceConfig mapConfig(final UpdateIngestionSourceConfigInput input) {
     final DataHubIngestionSourceConfig result = new DataHubIngestionSourceConfig();
-    result.setRecipe(input.getRecipe());
+    String recipe = input.getRecipe();
+    result.setRecipe(recipe);
     if (input.getVersion() != null) {
       result.setVersion(input.getVersion());
     }
     if (input.getExecutorId() != null) {
       result.setExecutorId(input.getExecutorId());
+    }
+    if (input.getDebugMode() != null) {
+      result.setDebugMode(input.getDebugMode());
     }
     return result;
   }

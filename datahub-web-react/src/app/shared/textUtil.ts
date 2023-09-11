@@ -19,11 +19,15 @@ export function capitalizeFirstLetterOnly(str?: string | null) {
     return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
-export function groupIdTextValidation(str: string) {
+export function validateCustomUrnId(str: string) {
     if (str.indexOf(' ') > 0) return false;
     if (str.indexOf(',') > 0) return false;
     if (str.indexOf('(') > 0) return false;
     if (str.indexOf(')') > 0) return false;
     if (str.indexOf(':') > 0) return false;
     return true;
+}
+
+export function pluralize(count: number, noun: string, suffix = 's') {
+    return `${noun}${count !== 1 ? suffix : ''}`;
 }

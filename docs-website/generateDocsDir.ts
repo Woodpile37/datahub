@@ -15,7 +15,8 @@ const GITHUB_EDIT_URL =
 const GITHUB_BROWSE_URL =
   "https://github.com/datahub-project/datahub/blob/master";
 
-const OUTPUT_DIRECTORY = "genDocs";
+const OUTPUT_DIRECTORY = "docs";
+const STATIC_DIRECTORY = "genStatic/artifacts";
 
 const SIDEBARS_DEF_PATH = "./sidebars.js";
 const sidebars = require(SIDEBARS_DEF_PATH);
@@ -84,8 +85,25 @@ function list_markdown_files(): string[] {
       .filter((filepath) => !all_generated_markdown_files.includes(filepath));
 
     if (untracked_files.length > 0) {
-      console.log(`Including untracked files in docs list: ${untracked_files}`);
+      console.log(
+        `Including untracked files in docs list: [${untracked_files}]`
+      );
       all_markdown_files = [...all_markdown_files, ...untracked_files];
+    }
+
+    // But we should also exclude any files that have been deleted.
+    const deleted_files = execSync(
+      "(git ls-files --full-name --deleted --exclude-standard .. | grep '.md$') || true"
+    )
+      .toString()
+      .trim()
+      .split("\n");
+
+    if (deleted_files.length > 0) {
+      console.log(`Removing deleted files from docs list: [${deleted_files}]`);
+      all_markdown_files = all_markdown_files.filter(
+        (filepath) => !deleted_files.includes(filepath)
+      );
     }
   }
 
@@ -104,9 +122,9 @@ function list_markdown_files(): string[] {
     /^metadata-ingestion\/docs\/sources\//, // these are used to generate docs, so we don't want to consider them here
     /^metadata-ingestion-examples\//,
     /^docker\/(?!README|datahub-upgrade|airflow\/local_airflow)/, // Drop all but a few docker docs.
-    /^docs\/rfc\/templates\/000-template\.md$/,
     /^docs\/docker\/README\.md/, // This one is just a pointer to another file.
     /^docs\/README\.md/, // This one is just a pointer to the hosted docs site.
+    /^SECURITY\.md$/,
     /^\s*$/, //Empty string
   ];
 
@@ -129,7 +147,7 @@ function get_id(filepath: string): string {
 }
 
 const hardcoded_slugs = {
-  "README.md": "/",
+  "README.md": "/introduction",
 };
 
 function get_slug(filepath: string): string {
@@ -155,10 +173,11 @@ function get_slug(filepath: string): string {
 
 const hardcoded_titles = {
   "README.md": "Introduction",
-  "docs/demo.md": "Demo",
+  "docs/demo.md": "See DataHub in Action",
   "docs/actions/README.md": "Introduction",
   "docs/actions/concepts.md": "Concepts",
   "docs/actions/quickstart.md": "Quickstart",
+  "docs/saas.md": "Managed DataHub",
 };
 // titles that have been hardcoded in sidebars.js
 // (for cases where doc is reference multiple times with different titles)
@@ -228,7 +247,12 @@ function markdown_guess_title(
   if (sidebar_label.startsWith("DataHub ")) {
     sidebar_label = sidebar_label.slice(8).trim();
   }
-  contents.data.sidebar_label = sidebar_label;
+  if (sidebar_label.startsWith("About DataHub ")) {
+    sidebar_label = sidebar_label.slice(14).trim();
+  }
+  if (sidebar_label != title) {
+    contents.data.sidebar_label = sidebar_label;
+  }
 }
 
 function markdown_add_edit_url(
@@ -250,6 +274,15 @@ function markdown_add_slug(
   const slug = get_slug(filepath);
   contents.data.slug = slug;
 }
+
+// function copy_platform_logos(): void {
+//   execSync("mkdir -p " + OUTPUT_DIRECTORY + "/imgs/platform-logos");
+//   execSync(
+//     "cp -r ../datahub-web-react/src/images " +
+//       OUTPUT_DIRECTORY +
+//       "/imgs/platform-logos"
+//   );
+// }
 
 function new_url(original: string, filepath: string): string {
   if (original.toLowerCase().startsWith(HOSTED_SITE_URL)) {
@@ -292,6 +325,7 @@ function new_url(original: string, filepath: string): string {
       ".py",
       ".ts",
       ".yml",
+      ".yaml",
       ".sh",
       ".env",
       ".sql",
@@ -351,7 +385,7 @@ function markdown_rewrite_urls(
     )
     .replace(
       // Also look for the [text]: url syntax.
-      /^\[(.+?)\]\s*:\s*(.+?)\s*$/gm,
+      /^\[([^^\n\r]+?)\]\s*:\s*(.+?)\s*$/gm,
       (_, text, url) => {
         const updated = new_url(url, filepath);
         return `[${text}]: ${updated}`;
@@ -394,7 +428,7 @@ function markdown_sanitize_and_linkify(content: string): string {
 
 function pretty_format_date(datetime: string): string {
   const d = new Date(Date.parse(datetime));
-  return d.toDateString();
+  return d.toISOString().split("T")[0];
 }
 
 function make_link_anchor(text: string): string {
@@ -416,26 +450,34 @@ custom_edit_url: https://github.com/datahub-project/datahub/blob/master/docs-web
 ## Summary\n\n`);
 
   const releases_list = await octokit.rest.repos.listReleases({
-    owner: "linkedin",
+    owner: "datahub-project",
     repo: "datahub",
   });
 
+  // We only embed release notes for releases in the last 3 months.
+  const release_notes_date_cutoff = new Date(
+    Date.now() - 1000 * 60 * 60 * 24 * 30 * 3
+  );
+
   // Construct a summary table.
-  let pastVersionCutoff = false;
   const releaseNoteVersions = new Set();
   contents.content += "| Version | Release Date | Links |\n";
   contents.content += "| ------- | ------------ | ----- |\n";
   for (const release of releases_list.data) {
+    if (release.prerelease || release.draft) {
+      continue;
+    }
+    const release_date = new Date(Date.parse(release.created_at));
+
     let row = `| **${release.tag_name}** | ${pretty_format_date(
       release.created_at
     )} |`;
-    if (release.tag_name == "v0.6.1") {
-      pastVersionCutoff = true;
-    } else if (!pastVersionCutoff) {
+    if (release_date > release_notes_date_cutoff) {
       row += `[Release Notes](#${make_link_anchor(release.tag_name)}), `;
       releaseNoteVersions.add(release.tag_name);
     }
     row += `[View on GitHub](${release.html_url}) |\n`;
+
     contents.content += row;
   }
   contents.content += "\n\n";
@@ -444,7 +486,7 @@ custom_edit_url: https://github.com/datahub-project/datahub/blob/master/docs-web
   for (const release of releases_list.data) {
     let body: string;
     if (releaseNoteVersions.has(release.tag_name)) {
-      body = release.body;
+      body = release.body ?? "";
       body = markdown_sanitize_and_linkify(body);
 
       // Redo the heading levels. First we find the min heading level, and then
@@ -494,6 +536,28 @@ function write_markdown_file(
   }
 }
 
+function copy_python_wheels(): void {
+  // Copy the built wheel files to the static directory.
+  const wheel_dirs = [
+    "../metadata-ingestion/dist",
+    "../metadata-ingestion-modules/airflow-plugin/dist",
+  ];
+
+  const wheel_output_directory = path.join(STATIC_DIRECTORY, "wheels");
+  fs.mkdirSync(wheel_output_directory, { recursive: true });
+
+  for (const wheel_dir of wheel_dirs) {
+    const wheel_files = fs.readdirSync(wheel_dir);
+    for (const wheel_file of wheel_files) {
+      const src = path.join(wheel_dir, wheel_file);
+      const dest = path.join(wheel_output_directory, wheel_file);
+
+      // console.log(`Copying artifact ${src} to ${dest}...`);
+      fs.copyFileSync(src, dest);
+    }
+  }
+}
+
 (async function main() {
   for (const filepath of markdown_files) {
     //console.log("Processing:", filepath);
@@ -505,6 +569,7 @@ function write_markdown_file(
     markdown_add_edit_url(contents, filepath);
     markdown_rewrite_urls(contents, filepath);
     markdown_enable_specials(contents, filepath);
+    //copy_platform_logos();
     // console.log(contents);
 
     const out_path = `${OUTPUT_DIRECTORY}/${filepath}`;
@@ -527,6 +592,9 @@ function write_markdown_file(
     "docs/actions/sources",
     "docs/actions/guides",
     "metadata-ingestion/archived",
+    "metadata-ingestion/sink_docs",
+    "docs/what",
+    "docs/wip",
   ];
   for (const filepath of markdown_files) {
     if (
@@ -542,4 +610,8 @@ function write_markdown_file(
       );
     }
   }
+
+  // Generate static directory.
+  copy_python_wheels();
+  // TODO: copy over the source json schemas + other artifacts.
 })();

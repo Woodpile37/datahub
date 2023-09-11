@@ -1,11 +1,16 @@
 import React from 'react';
 import styled from 'styled-components';
-import { Typography, Image, Tooltip } from 'antd';
-import { RightOutlined } from '@ant-design/icons';
+import { Typography, Image } from 'antd';
 import { Maybe } from 'graphql/jsutils/Maybe';
-import { Container } from '../../../../../../../types.generated';
+import { Container, GlossaryNode } from '../../../../../../../types.generated';
 import { ANTD_GRAY } from '../../../../constants';
 import ContainerLink from './ContainerLink';
+import ParentNodesView, {
+    StyledRightOutlined,
+    ParentNodesWrapper as ParentContainersWrapper,
+    Ellipsis,
+    StyledTooltip,
+} from './ParentNodesView';
 
 const LogoIcon = styled.span`
     display: flex;
@@ -44,31 +49,6 @@ const PlatformDivider = styled.div`
     vertical-align: text-top;
 `;
 
-const StyledRightOutlined = styled(RightOutlined)`
-    color: ${ANTD_GRAY[7]};
-    font-size: 8px;
-    margin: 0 10px;
-`;
-
-const ParentContainersWrapper = styled.div`
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex-direction: row-reverse;
-    display: flex;
-`;
-
-const Ellipsis = styled.span`
-    color: ${ANTD_GRAY[7]};
-    margin-right: 2px;
-`;
-
-const StyledTooltip = styled(Tooltip)`
-    display: flex;
-    white-space: nowrap;
-    overflow: hidden;
-`;
-
 export function getParentContainerNames(containers?: Maybe<Container>[] | null) {
     let parentNames = '';
     if (containers) {
@@ -87,19 +67,25 @@ export function getParentContainerNames(containers?: Maybe<Container>[] | null) 
 interface Props {
     platformName?: string;
     platformLogoUrl?: Maybe<string>;
+    platformNames?: Maybe<string>[];
+    platformLogoUrls?: Maybe<string>[];
     entityLogoComponent?: JSX.Element;
     instanceId?: string;
     typeIcon?: JSX.Element;
     entityType?: string;
     parentContainers?: Maybe<Container>[] | null;
+    parentNodes?: GlossaryNode[] | null;
     parentContainersRef: React.RefObject<HTMLDivElement>;
     areContainersTruncated: boolean;
 }
 
 function PlatformContentView(props: Props) {
     const {
+        parentNodes,
         platformName,
         platformLogoUrl,
+        platformNames,
+        platformLogoUrls,
         entityLogoComponent,
         instanceId,
         typeIcon,
@@ -116,15 +102,25 @@ function PlatformContentView(props: Props) {
         <PlatformContentWrapper>
             {typeIcon && <LogoIcon>{typeIcon}</LogoIcon>}
             <PlatformText>{entityType}</PlatformText>
-            {(!!platformName || !!instanceId || !!parentContainers?.length) && <PlatformDivider />}
+            {(!!platformName || !!instanceId || !!parentContainers?.length || !!parentNodes?.length) && (
+                <PlatformDivider />
+            )}
             {platformName && (
                 <LogoIcon>
-                    {(!!platformLogoUrl && <PreviewImage preview={false} src={platformLogoUrl} alt={platformName} />) ||
-                        entityLogoComponent}
+                    {!platformLogoUrl && !platformLogoUrls && entityLogoComponent}
+                    {!!platformLogoUrl && !platformLogoUrls && (
+                        <PreviewImage preview={false} src={platformLogoUrl} alt={platformName} />
+                    )}
+                    {!!platformLogoUrls &&
+                        platformLogoUrls.slice(0, 2).map((platformLogoUrlsEntry) => (
+                            <>
+                                <PreviewImage preview={false} src={platformLogoUrlsEntry || ''} alt={platformName} />
+                            </>
+                        ))}
                 </LogoIcon>
             )}
             <PlatformText>
-                {platformName}
+                {platformNames ? platformNames.join(' & ') : platformName}
                 {(directParentContainer || instanceId) && <StyledRightOutlined data-testid="right-arrow" />}
             </PlatformText>
             {instanceId && (
@@ -149,6 +145,7 @@ function PlatformContentView(props: Props) {
                 </ParentContainersWrapper>
                 {directParentContainer && <ContainerLink container={directParentContainer} />}
             </StyledTooltip>
+            <ParentNodesView parentNodes={parentNodes} />
         </PlatformContentWrapper>
     );
 }

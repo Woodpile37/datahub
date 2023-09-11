@@ -1,10 +1,11 @@
 import json
+import logging
 from functools import lru_cache
 from typing import Dict, Iterable, Optional
 
 import dateutil.parser as dp
 import requests
-from pydantic.class_validators import validator
+from pydantic.class_validators import root_validator, validator
 from pydantic.fields import Field
 
 from datahub.configuration.common import ConfigModel
@@ -35,6 +36,8 @@ from datahub.metadata.schema_classes import (
 )
 from datahub.utilities import config_clean
 
+logger = logging.getLogger(__name__)
+
 PAGE_SIZE = 25
 
 
@@ -58,7 +61,13 @@ chart_type_from_viz_type = {
 class SupersetConfig(ConfigModel):
     # See the Superset /security/login endpoint for details
     # https://superset.apache.org/docs/rest-api
-    connect_uri: str = Field(default="localhost:8088", description="Superset host URL.")
+    connect_uri: str = Field(
+        default="http://localhost:8088", description="Superset host URL."
+    )
+    display_uri: Optional[str] = Field(
+        default=None,
+        description="optional URL to use in links (if `connect_uri` is only for ingestion)",
+    )
     username: Optional[str] = Field(default=None, description="Superset username.")
     password: Optional[str] = Field(default=None, description="Superset password.")
     provider: str = Field(default="db", description="Superset provider.")
@@ -72,9 +81,16 @@ class SupersetConfig(ConfigModel):
         description="Can be used to change mapping for database names in superset to what you have in datahub",
     )
 
-    @validator("connect_uri")
+    @validator("connect_uri", "display_uri")
     def remove_trailing_slash(cls, v):
         return config_clean.remove_trailing_slashes(v)
+
+    @root_validator
+    def default_display_uri_to_connect_uri(cls, values):
+        base = values.get("display_uri")
+        if base is None:
+            values["display_uri"] = values.get("connect_uri")
+        return values
 
 
 def get_metric_name(metric):
@@ -125,8 +141,7 @@ class SupersetSource(Source):
 
         login_response = requests.post(
             f"{self.config.connect_uri}/api/v1/security/login",
-            None,
-            {
+            json={
                 "username": self.config.username,
                 "password": self.config.password,
                 "refresh": True,
@@ -135,6 +150,7 @@ class SupersetSource(Source):
         )
 
         self.access_token = login_response.json()["access_token"]
+        logger.debug("Got access token from superset")
 
         self.session = requests.Session()
         self.session.headers.update(
@@ -146,7 +162,7 @@ class SupersetSource(Source):
         )
 
         # Test the connection
-        test_response = self.session.get(f"{self.config.connect_uri}/api/v1/database")
+        test_response = self.session.get(f"{self.config.connect_uri}/api/v1/dashboard/")
         if test_response.status_code == 200:
             pass
             # TODO(Gabe): how should we message about this error?
@@ -208,7 +224,7 @@ class SupersetSource(Source):
             created=AuditStamp(time=modified_ts, actor=modified_actor),
             lastModified=AuditStamp(time=modified_ts, actor=modified_actor),
         )
-        dashboard_url = f"{self.config.connect_uri}{dashboard_data.get('url', '')}"
+        dashboard_url = f"{self.config.display_uri}{dashboard_data.get('url', '')}"
 
         chart_urns = []
         raw_position_data = dashboard_data.get("position_json", "{}")
@@ -240,15 +256,20 @@ class SupersetSource(Source):
 
         while current_dashboard_page * PAGE_SIZE <= total_dashboards:
             dashboard_response = self.session.get(
-                f"{self.config.connect_uri}/api/v1/dashboard",
+                f"{self.config.connect_uri}/api/v1/dashboard/",
                 params=f"q=(page:{current_dashboard_page},page_size:{PAGE_SIZE})",
             )
+            if dashboard_response.status_code != 200:
+                logger.warning(
+                    f"Failed to get dashboard data: {dashboard_response.text}"
+                )
+            dashboard_response.raise_for_status()
+
             payload = dashboard_response.json()
             total_dashboards = payload.get("count") or 0
 
             current_dashboard_page += 1
 
-            payload = dashboard_response.json()
             for dashboard_data in payload["result"]:
                 dashboard_snapshot = self.construct_dashboard_from_api_data(
                     dashboard_data
@@ -280,7 +301,7 @@ class SupersetSource(Source):
             lastModified=AuditStamp(time=modified_ts, actor=modified_actor),
         )
         chart_type = chart_type_from_viz_type.get(chart_data.get("viz_type", ""))
-        chart_url = f"{self.config.connect_uri}{chart_data.get('url', '')}"
+        chart_url = f"{self.config.display_uri}{chart_data.get('url', '')}"
 
         datasource_id = chart_data.get("datasource_id")
         datasource_urn = self.get_datasource_urn_from_id(datasource_id)
@@ -297,6 +318,24 @@ class SupersetSource(Source):
         group_bys = params.get("groupby", []) or []
         if isinstance(group_bys, str):
             group_bys = [group_bys]
+        # handling List[Union[str, dict]] case
+        # a dict containing two keys: sqlExpression and label
+        elif isinstance(group_bys, list) and len(group_bys) != 0:
+            temp_group_bys = []
+            for item in group_bys:
+                # if the item is a custom label
+                if isinstance(item, dict):
+                    item_value = item.get("label", "")
+                    if item_value != "":
+                        temp_group_bys.append(f"{item_value}_custom_label")
+                    else:
+                        temp_group_bys.append(str(item))
+
+                # if the item is a string
+                elif isinstance(item, str):
+                    temp_group_bys.append(item)
+
+            group_bys = temp_group_bys
 
         custom_properties = {
             "Metrics": ", ".join(metrics),
@@ -323,9 +362,13 @@ class SupersetSource(Source):
 
         while current_chart_page * PAGE_SIZE <= total_charts:
             chart_response = self.session.get(
-                f"{self.config.connect_uri}/api/v1/chart",
+                f"{self.config.connect_uri}/api/v1/chart/",
                 params=f"q=(page:{current_chart_page},page_size:{PAGE_SIZE})",
             )
+            if chart_response.status_code != 200:
+                logger.warning(f"Failed to get chart data: {chart_response.text}")
+            chart_response.raise_for_status()
+
             current_chart_page += 1
 
             payload = chart_response.json()

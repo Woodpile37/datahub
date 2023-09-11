@@ -19,8 +19,8 @@ from pydeequ.analyzers import (
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, count, isnan, when
-from pyspark.sql.types import DataType as SparkDataType
 from pyspark.sql.types import (
+    DataType as SparkDataType,
     DateType,
     DecimalType,
     DoubleType,
@@ -37,7 +37,7 @@ from datahub.configuration.common import AllowDenyPattern, ConfigModel
 from datahub.emitter.mce_builder import get_sys_time
 from datahub.ingestion.source.profiling.common import (
     Cardinality,
-    _convert_to_cardinality,
+    convert_to_cardinality,
 )
 from datahub.ingestion.source.s3.report import DataLakeSourceReport
 from datahub.metadata.schema_classes import (
@@ -70,8 +70,8 @@ class DataLakeProfilerConfig(ConfigModel):
         description="Whether to perform profiling at table-level only or include column-level profiling as well.",
     )
 
-    allow_deny_patterns: AllowDenyPattern = Field(
-        default=AllowDenyPattern.allow_all(), description=""
+    _allow_deny_patterns: AllowDenyPattern = pydantic.PrivateAttr(
+        default=AllowDenyPattern.allow_all(),
     )
 
     max_number_of_fields_to_profile: Optional[pydantic.PositiveInt] = Field(
@@ -124,24 +124,14 @@ class DataLakeProfilerConfig(ConfigModel):
         cls: "DataLakeProfilerConfig", values: Dict[str, Any]
     ) -> Dict[str, Any]:
         max_num_fields_to_profile_key = "max_number_of_fields_to_profile"
-        table_level_profiling_only_key = "profile_table_level_only"
         max_num_fields_to_profile = values.get(max_num_fields_to_profile_key)
-        if values.get(table_level_profiling_only_key):
-            all_field_level_metrics: List[str] = [
-                "include_field_null_count",
-                "include_field_min_value",
-                "include_field_max_value",
-                "include_field_mean_value",
-                "include_field_median_value",
-                "include_field_stddev_value",
-                "include_field_quantiles",
-                "include_field_distinct_value_frequencies",
-                "include_field_histogram",
-                "include_field_sample_values",
-            ]
-            # Suppress all field-level metrics
-            for field_level_metric in all_field_level_metrics:
-                values[field_level_metric] = False
+
+        # Disable all field-level metrics.
+        if values.get("profile_table_level_only"):
+            for field_level_metric in cls.__fields__:
+                if field_level_metric.startswith("include_field_"):
+                    values.setdefault(field_level_metric, False)
+
             assert (
                 max_num_fields_to_profile is None
             ), f"{max_num_fields_to_profile_key} should be set to None"
@@ -203,13 +193,11 @@ class _SingleTableProfiler:
         column_types = {x.name: x.dataType for x in dataframe.schema.fields}
 
         if self.profiling_config.profile_table_level_only:
-
             return
 
         # get column distinct counts
         for column in dataframe.columns:
-
-            if not self.profiling_config.allow_deny_patterns.allowed(column):
+            if not self.profiling_config._allow_deny_patterns.allowed(column):
                 self.ignored_columns.append(column)
                 continue
 
@@ -273,7 +261,8 @@ class _SingleTableProfiler:
         )
         column_null_counts = null_counts.toPandas().T[0].to_dict()
         column_null_fractions = {
-            c: column_null_counts[c] / self.row_count for c in self.columns_to_profile
+            c: column_null_counts[c] / self.row_count if self.row_count != 0 else 0
+            for c in self.columns_to_profile
         }
         column_nonnull_counts = {
             c: self.row_count - column_null_counts[c] for c in self.columns_to_profile
@@ -312,7 +301,7 @@ class _SingleTableProfiler:
                 )
 
             column_spec.type_ = column_types[column]
-            column_spec.cardinality = _convert_to_cardinality(
+            column_spec.cardinality = convert_to_cardinality(
                 column_distinct_counts[column],
                 column_null_fractions[column],
             )
@@ -352,7 +341,6 @@ class _SingleTableProfiler:
             self.analyzer.addAnalyzer(Histogram(column, maxDetailBins=MAX_HIST_BINS))
 
     def prepare_table_profiles(self) -> None:
-
         row_count = self.row_count
 
         telemetry.telemetry_instance.ping(
@@ -478,7 +466,6 @@ class _SingleTableProfiler:
         histogram_columns = set()
 
         if len(column_histogram_metrics) > 0:
-
             # we only want the absolute counts for each histogram for now
             column_histogram_metrics = column_histogram_metrics[
                 column_histogram_metrics["name"].apply(
@@ -541,13 +528,11 @@ class _SingleTableProfiler:
                 ]
 
             if column in histogram_columns:
-
                 column_histogram = histogram_counts.loc[column]
                 # sort so output is deterministic
                 column_histogram = column_histogram.sort_index()
 
                 if column_spec.histogram_distinct:
-
                     column_profile.distinctValueFrequencies = [
                         ValueFrequencyClass(
                             value=value, frequency=int(column_histogram.loc[value])
@@ -560,7 +545,6 @@ class _SingleTableProfiler:
                     )
 
                 else:
-
                     column_profile.histogram = HistogramClass(
                         [str(x) for x in column_histogram.index],
                         [float(x) for x in column_histogram],

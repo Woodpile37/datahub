@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Union
 
 from datahub.api.entities.datajob import DataFlow, DataJob
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
@@ -15,7 +15,6 @@ from datahub.metadata.com.linkedin.pegasus2avro.dataprocess import (
 )
 from datahub.metadata.schema_classes import (
     AuditStampClass,
-    ChangeTypeClass,
     DataProcessInstanceRunEventClass,
     DataProcessInstanceRunResultClass,
     DataProcessRunStatusClass,
@@ -42,6 +41,7 @@ class InstanceRunResult(str, Enum):
     SUCCESS = RunResultType.SUCCESS
     SKIPPED = RunResultType.SKIPPED
     FAILURE = RunResultType.FAILURE
+    UP_FOR_RETRY = RunResultType.UP_FOR_RETRY
 
 
 @dataclass
@@ -55,7 +55,7 @@ class DataProcessInstance:
         template_urn (Optional[Union[DataJobUrn, DataFlowUrn]]): The parent DataJob or DataFlow which was instantiated if applicable
         parent_instance (Optional[DataProcessInstanceUrn]): The parent execution's urn if applicable
         properties Dict[str, str]: Custom properties to set for the DataProcessInstance
-        url (Optional[str]): Url which points to the exection at the orchestrator
+        url (Optional[str]): Url which points to the execution at the orchestrator
         inlets (List[str]): List of entities the DataProcessInstance consumes
         outlets (List[str]): List of entities the DataProcessInstance produces
     """
@@ -95,15 +95,12 @@ class DataProcessInstance:
         :param attempt: (int) the number of attempt of the execution with the same execution id
         """
         mcp = MetadataChangeProposalWrapper(
-            entityType="dataProcessInstance",
             entityUrn=str(self.urn),
-            aspectName="dataProcessInstanceRunEvent",
             aspect=DataProcessInstanceRunEventClass(
                 status=DataProcessRunStatusClass.STARTED,
                 timestampMillis=start_timestamp_millis,
                 attempt=attempt,
             ),
-            changeType=ChangeTypeClass.UPSERT,
         )
         yield mcp
 
@@ -118,10 +115,10 @@ class DataProcessInstance:
         """
 
         :rtype: None
-        :param emitter: Datahub Emitter to emit the proccess event
+        :param emitter: Datahub Emitter to emit the process event
         :param start_timestamp_millis: (int) the execution start time in milliseconds
         :param attempt: the number of attempt of the execution with the same execution id
-        :param emit_template: (bool) If it is set the template of the execution (datajob, datflow) will be emitted as well.
+        :param emit_template: (bool) If it is set the template of the execution (datajob, dataflow) will be emitted as well.
         :param callback: (Optional[Callable[[Exception, str], None]]) the callback method for KafkaEmitter if it is used
         """
         if emit_template and self.template_urn is not None:
@@ -163,7 +160,7 @@ class DataProcessInstance:
             for mcp in template_object.generate_mcp():
                 self._emit_mcp(mcp, emitter, callback)
 
-        for mcp in self.generate_mcp():
+        for mcp in self.generate_mcp(created_ts_millis=start_timestamp_millis):
             self._emit_mcp(mcp, emitter, callback)
         for mcp in self.start_event_mcp(start_timestamp_millis, attempt):
             self._emit_mcp(mcp, emitter, callback)
@@ -183,9 +180,7 @@ class DataProcessInstance:
         :param attempt: (int) the attempt number of this execution
         """
         mcp = MetadataChangeProposalWrapper(
-            entityType="dataProcessInstance",
             entityUrn=str(self.urn),
-            aspectName="dataProcessInstanceRunEvent",
             aspect=DataProcessInstanceRunEventClass(
                 status=DataProcessRunStatusClass.COMPLETE,
                 timestampMillis=end_timestamp_millis,
@@ -197,7 +192,6 @@ class DataProcessInstance:
                 ),
                 attempt=attempt,
             ),
-            changeType=ChangeTypeClass.UPSERT,
         )
         yield mcp
 
@@ -228,33 +222,30 @@ class DataProcessInstance:
         ):
             self._emit_mcp(mcp, emitter, callback)
 
-    def generate_mcp(self) -> Iterable[MetadataChangeProposalWrapper]:
+    def generate_mcp(
+        self, created_ts_millis: Optional[int] = None
+    ) -> Iterable[MetadataChangeProposalWrapper]:
         """
         Generates mcps from the object
         :rtype: Iterable[MetadataChangeProposalWrapper]
         """
         mcp = MetadataChangeProposalWrapper(
-            entityType="dataProcessInstance",
             entityUrn=str(self.urn),
-            aspectName="dataProcessInstanceProperties",
             aspect=DataProcessInstanceProperties(
                 name=self.id,
                 created=AuditStampClass(
-                    time=int(time.time() * 1000),
+                    time=created_ts_millis or int(time.time() * 1000),
                     actor="urn:li:corpuser:datahub",
                 ),
                 type=self.type,
                 customProperties=self.properties,
                 externalUrl=self.url,
             ),
-            changeType=ChangeTypeClass.UPSERT,
         )
         yield mcp
 
         mcp = MetadataChangeProposalWrapper(
-            entityType="dataProcessInstance",
             entityUrn=str(self.urn),
-            aspectName="dataProcessInstanceRelationships",
             aspect=DataProcessInstanceRelationships(
                 upstreamInstances=[str(urn) for urn in self.upstream_urns],
                 parentTemplate=str(self.template_urn) if self.template_urn else None,
@@ -262,7 +253,6 @@ class DataProcessInstance:
                 if self.parent_instance is not None
                 else None,
             ),
-            changeType=ChangeTypeClass.UPSERT,
         )
         yield mcp
 
@@ -279,13 +269,7 @@ class DataProcessInstance:
         :param emitter: (Union[DatahubRestEmitter, DatahubKafkaEmitter]) the datahub emitter to emit generated mcps
         :param callback: (Optional[Callable[[Exception, str], None]]) the callback method for KafkaEmitter if it is used
         """
-        if type(emitter).__name__ == "DatahubKafkaEmitter":
-            assert callback is not None
-            kafka_emitter = cast("DatahubKafkaEmitter", emitter)
-            kafka_emitter.emit(mcp, callback)
-        else:
-            rest_emitter = cast("DatahubRestEmitter", emitter)
-            rest_emitter.emit(mcp)
+        emitter.emit(mcp, callback)
 
     def emit(
         self,
@@ -312,8 +296,8 @@ class DataProcessInstance:
 
         :param datajob: (DataJob) the datajob from generate the DataProcessInstance
         :param id: (str) the id for the DataProcessInstance
-        :param clone_inlets: (bool) wheather to clone datajob's inlets
-        :param clone_outlets: (bool) wheather to clone datajob's outlets
+        :param clone_inlets: (bool) whether to clone datajob's inlets
+        :param clone_outlets: (bool) whether to clone datajob's outlets
         :return: DataProcessInstance
         """
         dpi: DataProcessInstance = DataProcessInstance(
@@ -351,36 +335,27 @@ class DataProcessInstance:
     def generate_inlet_outlet_mcp(self) -> Iterable[MetadataChangeProposalWrapper]:
         if self.inlets:
             mcp = MetadataChangeProposalWrapper(
-                entityType="dataProcessInstance",
                 entityUrn=str(self.urn),
-                aspectName="dataProcessInstanceInput",
                 aspect=DataProcessInstanceInput(
                     inputs=[str(urn) for urn in self.inlets]
                 ),
-                changeType=ChangeTypeClass.UPSERT,
             )
             yield mcp
 
         if self.outlets:
             mcp = MetadataChangeProposalWrapper(
-                entityType="dataProcessInstance",
                 entityUrn=str(self.urn),
-                aspectName="dataProcessInstanceOutput",
                 aspect=DataProcessInstanceOutput(
                     outputs=[str(urn) for urn in self.outlets]
                 ),
-                changeType=ChangeTypeClass.UPSERT,
             )
             yield mcp
 
         # Force entity materialization
         for iolet in self.inlets + self.outlets:
             mcp = MetadataChangeProposalWrapper(
-                entityType="dataset",
                 entityUrn=str(iolet),
-                aspectName="status",
                 aspect=StatusClass(removed=False),
-                changeType=ChangeTypeClass.UPSERT,
             )
 
             yield mcp

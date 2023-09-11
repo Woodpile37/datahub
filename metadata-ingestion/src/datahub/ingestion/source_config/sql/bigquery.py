@@ -7,7 +7,7 @@ import pydantic
 
 from datahub.configuration.common import ConfigurationError
 from datahub.configuration.time_window_config import BaseTimeWindowConfig
-from datahub.ingestion.source.sql.sql_common import SQLAlchemyConfig
+from datahub.ingestion.source.sql.sql_config import SQLAlchemyConfig
 from datahub.ingestion.source_config.bigquery import BigQueryBaseConfig
 from datahub.ingestion.source_config.usage.bigquery_usage import BigQueryCredential
 
@@ -18,18 +18,18 @@ class BigQueryConfig(BigQueryBaseConfig, BaseTimeWindowConfig, SQLAlchemyConfig)
     scheme: str = "bigquery"
     project_id: Optional[str] = pydantic.Field(
         default=None,
-        description="Project ID to ingest from. If not specified, will infer from environment.",
+        description="Project ID where you have rights to run queries and create tables. If `storage_project_id` is not specified then it is assumed this is the same project where data is stored. If not specified, will infer from environment.",
     )
-    lineage_client_project_id: Optional[str] = pydantic.Field(
+    storage_project_id: Optional[str] = pydantic.Field(
         default=None,
-        description="If you want to use a different ProjectId for the lineage collection you can set it here.",
+        description="If your data is stored in a different project where you don't have rights to run jobs and create tables then specify this field. The same service account must have read rights in this GCP project and write rights in `project_id`.",
     )
     log_page_size: pydantic.PositiveInt = pydantic.Field(
         default=1000,
         description="The number of log item will be queried per page for lineage collection",
     )
     credential: Optional[BigQueryCredential] = pydantic.Field(
-        description="BigQuery credential informations"
+        default=None, description="BigQuery credential informations"
     )
     # extra_client_options, include_table_lineage and max_query_duration are relevant only when computing the lineage.
     extra_client_options: Dict[str, Any] = pydantic.Field(
@@ -44,6 +44,7 @@ class BigQueryConfig(BigQueryBaseConfig, BaseTimeWindowConfig, SQLAlchemyConfig)
         default=timedelta(minutes=15),
         description="Correction to pad start_time and end_time with. For handling the case where the read happens within our time range but the query completion event is delayed and happens after the configured end time.",
     )
+
     bigquery_audit_metadata_datasets: Optional[List[str]] = pydantic.Field(
         default=None,
         description="A list of datasets that contain a table named cloudaudit_googleapis_com_data_access which contain BigQuery audit logs, specifically, those containing BigQueryAuditMetadata. It is recommended that the project of the dataset is also specified, for example, projectA.datasetB.",
@@ -57,10 +58,6 @@ class BigQueryConfig(BigQueryBaseConfig, BaseTimeWindowConfig, SQLAlchemyConfig)
         description="Whether to read date sharded tables or time partitioned tables when extracting usage from exported audit logs.",
     )
     _credentials_path: Optional[str] = pydantic.PrivateAttr(None)
-    temp_table_dataset_prefix: str = pydantic.Field(
-        default="_",
-        description="If you are creating temp tables in a dataset with a particular prefix you can use this config to set the prefix for the dataset. This is to support workflows from before bigquery's introduction of temp tables. By default we use `_` because of datasets that begin with an underscore are hidden by default https://cloud.google.com/bigquery/docs/datasets#dataset-naming.",
-    )
     use_v2_audit_metadata: Optional[bool] = pydantic.Field(
         default=False, description="Whether to ingest logs using the v2 format."
     )
@@ -79,7 +76,9 @@ class BigQueryConfig(BigQueryBaseConfig, BaseTimeWindowConfig, SQLAlchemyConfig)
             )
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self._credentials_path
 
-    def get_sql_alchemy_url(self):
+    def get_sql_alchemy_url(self, run_on_compute: bool = False) -> str:
+        if self.storage_project_id and not run_on_compute:
+            return f"{self.scheme}://{self.storage_project_id}"
         if self.project_id:
             return f"{self.scheme}://{self.project_id}"
         # When project_id is not set, we will attempt to detect the project ID
@@ -106,9 +105,4 @@ class BigQueryConfig(BigQueryBaseConfig, BaseTimeWindowConfig, SQLAlchemyConfig)
             raise ConfigurationError(
                 "bigquery_audit_metadata_datasets must be specified if using exported audit metadata. Otherwise set use_v2_audit_metadata to True."
             )
-            pass
         return values
-
-    @pydantic.validator("platform")
-    def platform_is_always_bigquery(cls, v):
-        return "bigquery"

@@ -1,197 +1,34 @@
 import logging
-import os
-import re
 from typing import Any, Dict, List, Optional, Union
 
-import parse
 import pydantic
 from pydantic.fields import Field
-from wcmatch import pathlib
 
-from datahub.configuration.common import AllowDenyPattern, ConfigModel
+from datahub.configuration.common import AllowDenyPattern
 from datahub.configuration.source_common import (
-    EnvBasedSourceConfigBase,
-    PlatformSourceConfigBase,
+    EnvConfigMixin,
+    PlatformInstanceConfigMixin,
 )
-from datahub.ingestion.source.aws.aws_common import AwsSourceConfig
-from datahub.ingestion.source.aws.s3_util import get_bucket_name, is_s3_uri
+from datahub.configuration.validate_field_rename import pydantic_renamed_field
+from datahub.ingestion.source.aws.aws_common import AwsConnectionConfig
+from datahub.ingestion.source.aws.path_spec import PathSpec
 from datahub.ingestion.source.s3.profiling import DataLakeProfilerConfig
 
 # hide annoying debug errors from py4j
 logging.getLogger("py4j").setLevel(logging.ERROR)
 logger: logging.Logger = logging.getLogger(__name__)
 
-SUPPORTED_FILE_TYPES: List[str] = ["csv", "tsv", "json", "parquet", "avro"]
-SUPPORTED_COMPRESSIONS: List[str] = ["gz", "bz2"]
 
-
-class PathSpec(ConfigModel):
-    class Config:
-        arbitrary_types_allowed = True
-
-    include: str = Field(
-        description="Path to table (s3 or local file system). Name variable {table} is used to mark the folder with dataset. In absence of {table}, file level dataset will be created. Check below examples for more details."
-    )
-    exclude: Optional[List[str]] = Field(
-        default=None,
-        description="list of paths in glob pattern which will be excluded while scanning for the datasets",
-    )
-    file_types: List[str] = Field(
-        default=SUPPORTED_FILE_TYPES,
-        description="Files with extenstions specified here (subset of default value) only will be scanned to create dataset. Other files will be omitted.",
-    )
-
-    default_extension: Optional[str] = Field(
-        description="For files without extension it will assume the specified file type. If it is not set the files without extensions will be skipped.",
-    )
-
-    table_name: Optional[str] = Field(
-        default=None,
-        description="Display name of the dataset.Combination of named variableds from include path and strings",
-    )
-
-    enable_compression: bool = Field(
-        default=True,
-        description="Enable or disable processing compressed files. Currenly .gz and .bz files are supported.",
-    )
-
-    sample_files: bool = Field(
-        default=True,
-        description="Not listing all the files but only taking a handful amount of sample file to infer the schema. File count and file size calculation will be disabled. This can affect performance significantly if enabled",
-    )
-
-    # to be set internally
-    _parsable_include: str
-    _compiled_include: parse.Parser
-    _glob_include: str
-    _is_s3: bool
-
-    def allowed(self, path: str) -> bool:
-        logger.debug(f"Checking file to inclusion: {path}")
-        if not pathlib.PurePath(path).globmatch(
-            self._glob_include, flags=pathlib.GLOBSTAR
-        ):
-            return False
-        logger.debug(f"{path} matched include ")
-        if self.exclude:
-            for exclude_path in self.exclude:
-                if pathlib.PurePath(path).globmatch(
-                    exclude_path, flags=pathlib.GLOBSTAR
-                ):
-                    return False
-        logger.debug(f"{path} is not excluded")
-        ext = os.path.splitext(path)[1].strip(".")
-
-        if (ext == "" and self.default_extension is None) and (
-            ext != "*" and ext not in self.file_types
-        ):
-            return False
-
-        logger.debug(f"{path} had selected extension {ext}")
-        logger.debug(f"{path} allowed for dataset creation")
-        return True
-
-    def is_s3(self):
-        return self._is_s3
-
-    @classmethod
-    def get_parsable_include(cls, include: str) -> str:
-        parsable_include = include
-        for i in range(parsable_include.count("*")):
-            parsable_include = parsable_include.replace("*", f"{{folder[{i}]}}", 1)
-        return parsable_include
-
-    def get_named_vars(self, path: str) -> Union[None, parse.Result, parse.Match]:
-        return self._compiled_include.parse(path)
-
-    @pydantic.root_validator()
-    def validate_path_spec(cls, values: Dict) -> Dict[str, Any]:
-
-        if "**" in values["include"]:
-            raise ValueError("path_spec.include cannot contain '**'")
-
-        if values.get("file_types") is None:
-            values["file_types"] = SUPPORTED_FILE_TYPES
-        else:
-            for file_type in values["file_types"]:
-                if file_type not in SUPPORTED_FILE_TYPES:
-                    raise ValueError(
-                        f"file type {file_type} not in supported file types. Please specify one from {SUPPORTED_FILE_TYPES}"
-                    )
-
-        if values.get("default_extension") is not None:
-            if values.get("default_extension") not in SUPPORTED_FILE_TYPES:
-                raise ValueError(
-                    f"default extension {values.get('default_extension')} not in supported default file extension. Please specify one from {SUPPORTED_FILE_TYPES}"
-                )
-
-        include_ext = os.path.splitext(values["include"])[1].strip(".")
-        if (
-            include_ext not in values["file_types"]
-            and include_ext != "*"
-            and not values["default_extension"]
-            and include_ext not in SUPPORTED_COMPRESSIONS
-        ):
-            raise ValueError(
-                f"file type specified ({include_ext}) in path_spec.include is not in specified file "
-                f'types. Please select one from {values.get("file_types")} or specify ".*" to allow all types'
-            )
-
-        values["_parsable_include"] = PathSpec.get_parsable_include(values["include"])
-        logger.debug(f'Setting _parsable_include: {values.get("_parsable_include")}')
-        compiled_include_tmp = parse.compile(values["_parsable_include"])
-        values["_compiled_include"] = compiled_include_tmp
-        logger.debug(f'Setting _compiled_include: {values["_compiled_include"]}')
-        values["_glob_include"] = re.sub(r"\{[^}]+\}", "*", values["include"])
-        logger.debug(f'Setting _glob_include: {values.get("_glob_include")}')
-
-        if values.get("table_name") is None:
-            if "{table}" in values["include"]:
-                values["table_name"] = "{table}"
-        else:
-            logger.debug(f"include fields: {compiled_include_tmp.named_fields}")
-            logger.debug(
-                f"table_name fields: {parse.compile(values['table_name']).named_fields}"
-            )
-            if not all(
-                x in values["_compiled_include"].named_fields
-                for x in parse.compile(values["table_name"]).named_fields
-            ):
-                raise ValueError(
-                    "Not all named variables used in path_spec.table_name are specified in "
-                    "path_spec.include"
-                )
-
-        if values.get("exclude") is not None:
-            for exclude_path in values["exclude"]:
-                if len(parse.compile(exclude_path).named_fields) != 0:
-                    raise ValueError(
-                        "path_spec.exclude should not contain any named variables"
-                    )
-
-        values["_is_s3"] = is_s3_uri(values["include"])
-        if not values["_is_s3"]:
-            # Sampling only makes sense on s3 currently
-            values["sample_files"] = False
-        logger.debug(f'Setting _is_s3: {values.get("_is_s3")}')
-        return values
-
-
-class DataLakeSourceConfig(PlatformSourceConfigBase, EnvBasedSourceConfigBase):
-    path_specs: Optional[List[PathSpec]] = Field(
-        description="List of PathSpec. See below the details about PathSpec"
-    )
-    path_spec: Optional[PathSpec] = Field(
-        description="Path spec will be deprecated in favour of path_specs option."
+class DataLakeSourceConfig(PlatformInstanceConfigMixin, EnvConfigMixin):
+    path_specs: List[PathSpec] = Field(
+        description="List of PathSpec. See [below](#path-spec) the details about PathSpec"
     )
     platform: str = Field(
-        default="", description="The platform that this source connects to"
+        default="",
+        description="The platform that this source connects to (either 's3' or 'file'). "
+        "If not specified, the platform will be inferred from the path_specs.",
     )
-    platform_instance: Optional[str] = Field(
-        default=None,
-        description="The instance of the platform that all assets produced by this recipe belong to",
-    )
-    aws_config: Optional[AwsSourceConfig] = Field(
+    aws_config: Optional[AwsConnectionConfig] = Field(
         default=None, description="AWS configuration"
     )
 
@@ -203,6 +40,12 @@ class DataLakeSourceConfig(PlatformSourceConfigBase, EnvBasedSourceConfigBase):
     use_s3_object_tags: Optional[bool] = Field(
         None,
         description="# Whether or not to create tags in datahub from the s3 object",
+    )
+
+    # Whether to update the table schema when schema in files within the partitions are updated
+    update_schema_on_partition_file_updates: Optional[bool] = Field(
+        default=False,
+        description="Whether to update the table schema when schema in files within the partitions are updated.",
     )
 
     profile_patterns: AllowDenyPattern = Field(
@@ -222,61 +65,66 @@ class DataLakeSourceConfig(PlatformSourceConfigBase, EnvBasedSourceConfigBase):
         description="Maximum number of rows to use when inferring schemas for TSV and CSV files.",
     )
 
-    @pydantic.root_validator(pre=False)
-    def validate_platform(cls, values: Dict) -> Dict:
-        value = values.get("platform")
-        if value is not None and value != "":
-            return values
+    verify_ssl: Union[bool, str] = Field(
+        default=True,
+        description="Either a boolean, in which case it controls whether we verify the server's TLS certificate, or a string, in which case it must be a path to a CA bundle to use.",
+    )
 
-        if not values.get("path_specs") and not values.get("path_spec"):
-            raise ValueError("Either path_specs or path_spec needs to be specified")
+    _rename_path_spec_to_plural = pydantic_renamed_field(
+        "path_spec", "path_specs", lambda path_spec: [path_spec]
+    )
 
-        if values.get("path_specs") and values.get("path_spec"):
+    @pydantic.validator("path_specs", always=True)
+    def check_path_specs_and_infer_platform(
+        cls, path_specs: List[PathSpec], values: Dict
+    ) -> List[PathSpec]:
+        if len(path_specs) == 0:
+            raise ValueError("path_specs must not be empty")
+
+        # Check that all path specs have the same platform.
+        guessed_platforms = set(
+            "s3" if path_spec.is_s3 else "file" for path_spec in path_specs
+        )
+        if len(guessed_platforms) > 1:
             raise ValueError(
-                "Either path_specs or path_spec needs to be specified but not both"
+                f"Cannot have multiple platforms in path_specs: {guessed_platforms}"
+            )
+        guessed_platform = guessed_platforms.pop()
+
+        # Ensure s3 configs aren't used for file sources.
+        if guessed_platform != "s3" and (
+            values.get("use_s3_object_tags") or values.get("use_s3_bucket_tags")
+        ):
+            raise ValueError(
+                "Cannot grab s3 object/bucket tags when platform is not s3. Remove the flag or use s3."
             )
 
-        if values.get("path_spec"):
-            logger.warning(
-                "path_spec config property is deprecated, please use path_specs instead of it."
+        # Infer platform if not specified.
+        if values.get("platform") and values["platform"] != guessed_platform:
+            raise ValueError(
+                f"All path_specs belong to {guessed_platform} platform, but platform is set to {values['platform']}"
             )
-            values["path_specs"] = [values.get("path_spec")]
+        else:
+            logger.debug(f'Setting config "platform": {guessed_platform}')
+            values["platform"] = guessed_platform
 
-        bucket_name: str = ""
-        for path_spec in values.get("path_specs", []):
-            if path_spec.is_s3():
-                platform = "s3"
-            else:
-                if values.get("use_s3_object_tags") or values.get("use_s3_bucket_tags"):
-                    raise ValueError(
-                        "cannot grab s3 tags for platform != s3. Remove the flag or use s3."
-                    )
+        return path_specs
 
-                platform = "file"
-
-            if values.get("platform", "") != "":
-                if values["platform"] != platform:
-                    raise ValueError("all path_spec should belong to the same platform")
-            else:
-                values["platform"] = platform
-                logger.debug(f'Setting config "platform": {values.get("platform")}')
-
-            if platform == "s3":
-                if bucket_name == "":
-                    bucket_name = get_bucket_name(path_spec.include)
-                else:
-                    if bucket_name != get_bucket_name(path_spec.include):
-                        raise ValueError(
-                            "all path_spec should reference the same s3 bucket"
-                        )
-
-        return values
+    @pydantic.validator("platform", always=True)
+    def platform_not_empty(cls, platform: str, values: dict) -> str:
+        inferred_platform = values.get(
+            "platform", None
+        )  # we may have inferred it above
+        platform = platform or inferred_platform
+        if not platform:
+            raise ValueError("platform must not be empty")
+        return platform
 
     @pydantic.root_validator()
     def ensure_profiling_pattern_is_passed_to_profiling(
         cls, values: Dict[str, Any]
     ) -> Dict[str, Any]:
-        profiling = values.get("profiling")
+        profiling: Optional[DataLakeProfilerConfig] = values.get("profiling")
         if profiling is not None and profiling.enabled:
-            profiling.allow_deny_patterns = values["profile_patterns"]
+            profiling._allow_deny_patterns = values["profile_patterns"]
         return values

@@ -21,6 +21,13 @@ module.exports = {
                 new CopyWebpackPlugin({
                     patterns: [{ from: 'src/images', to: 'platforms' }],
                 }),
+                // Copy monaco-editor files to the build directory
+                new CopyWebpackPlugin({
+                    patterns: [
+                        { from: "node_modules/monaco-editor/min/vs/", to: "monaco-editor/vs" },
+                        { from: "node_modules/monaco-editor/min-maps/vs/", to: "monaco-editor/min-maps/vs" },
+                    ],
+                }),
             ],
         },
     },
@@ -33,4 +40,14 @@ module.exports = {
             },
         },
     ],
+    jest: {
+        configure: (jestConfig) => {
+            jestConfig.transformIgnorePatterns = [
+                // Ensures that lib0 and y-protocol libraries are transformed through babel as well
+                'node_modules/(?!(lib0|y-protocols)).+\\.(js|jsx|mjs|cjs|ts|tsx)$',
+                '^.+\\.module\\.(css|sass|scss)$',
+            ];
+            return jestConfig;
+        },
+    },
 };

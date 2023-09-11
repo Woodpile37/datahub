@@ -9,10 +9,13 @@ import {
     Owner,
     SearchInsight,
     ParentContainersResult,
+    Deprecation,
+    ChartStatsSummary,
 } from '../../../../types.generated';
 import DefaultPreviewCard from '../../../preview/DefaultPreviewCard';
 import { useEntityRegistry } from '../../../useEntityRegistry';
-import { capitalizeFirstLetter } from '../../../shared/textUtil';
+import { IconStyleType } from '../../Entity';
+import { ChartStatsSummary as ChartStatsSummaryView } from '../shared/ChartStatsSummary';
 
 export const ChartPreview = ({
     urn,
@@ -28,10 +31,16 @@ export const ChartPreview = ({
     container,
     insights,
     logoUrl,
+    deprecation,
+    statsSummary,
+    lastUpdatedMs,
+    createdMs,
+    externalUrl,
     parentContainers,
+    snippet,
 }: {
     urn: string;
-    platform: string;
+    platform?: string;
     platformInstanceId?: string;
     name?: string;
     description?: string | null;
@@ -43,19 +52,26 @@ export const ChartPreview = ({
     container?: Container | null;
     insights?: Array<SearchInsight> | null;
     logoUrl?: string | null;
+    deprecation?: Deprecation | null;
+    statsSummary?: ChartStatsSummary | null;
+    lastUpdatedMs?: number | null;
+    createdMs?: number | null;
+    externalUrl?: string | null;
     parentContainers?: ParentContainersResult | null;
+    snippet?: React.ReactNode | null;
 }): JSX.Element => {
     const entityRegistry = useEntityRegistry();
-    const capitalizedPlatform = capitalizeFirstLetter(platform);
 
     return (
         <DefaultPreviewCard
             url={entityRegistry.getEntityUrl(EntityType.Chart, urn)}
             name={name || ''}
+            urn={urn}
             description={description || ''}
             type="Chart"
+            typeIcon={entityRegistry.getIcon(EntityType.Chart, 14, IconStyleType.ACCENT)}
             logoUrl={logoUrl || ''}
-            platform={capitalizedPlatform}
+            platform={platform}
             platformInstanceId={platformInstanceId}
             qualifier={access}
             tags={tags}
@@ -65,6 +81,17 @@ export const ChartPreview = ({
             container={container || undefined}
             insights={insights}
             parentContainers={parentContainers}
+            deprecation={deprecation}
+            externalUrl={externalUrl}
+            snippet={snippet}
+            subHeader={
+                <ChartStatsSummaryView
+                    viewCount={statsSummary?.viewCount}
+                    uniqueUserCountLast30Days={statsSummary?.uniqueUserCountLast30Days}
+                    lastUpdatedMs={lastUpdatedMs}
+                    createdMs={createdMs}
+                />
+            }
         />
     );
 };

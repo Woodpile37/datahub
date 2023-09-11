@@ -12,14 +12,18 @@ import com.linkedin.datahub.graphql.generated.LineageConfig;
 import com.linkedin.datahub.graphql.generated.ManagedIngestionConfig;
 import com.linkedin.datahub.graphql.generated.PoliciesConfig;
 import com.linkedin.datahub.graphql.generated.Privilege;
+import com.linkedin.datahub.graphql.generated.QueriesTabConfig;
 import com.linkedin.datahub.graphql.generated.ResourcePrivileges;
 import com.linkedin.datahub.graphql.generated.TelemetryConfig;
 import com.linkedin.datahub.graphql.generated.TestsConfig;
-import com.linkedin.datahub.graphql.generated.VisualConfiguration;
-import com.linkedin.metadata.config.DatahubConfiguration;
+import com.linkedin.datahub.graphql.generated.ViewsConfig;
+import com.linkedin.datahub.graphql.generated.VisualConfig;
+import com.linkedin.metadata.config.DataHubConfiguration;
 import com.linkedin.metadata.config.IngestionConfiguration;
 import com.linkedin.metadata.config.TestsConfiguration;
+import com.linkedin.metadata.config.ViewsConfiguration;
 import com.linkedin.metadata.telemetry.TelemetryConfiguration;
+import com.linkedin.metadata.config.VisualConfiguration;
 import com.linkedin.metadata.version.GitVersion;
 import graphql.schema.DataFetcher;
 import graphql.schema.DataFetchingEnvironment;
@@ -41,7 +45,8 @@ public class AppConfigResolver implements DataFetcher<CompletableFuture<AppConfi
   private final VisualConfiguration _visualConfiguration;
   private final TelemetryConfiguration _telemetryConfiguration;
   private final TestsConfiguration _testsConfiguration;
-  private final DatahubConfiguration _datahubConfiguration;
+  private final DataHubConfiguration _datahubConfiguration;
+  private final ViewsConfiguration _viewsConfiguration;
 
   public AppConfigResolver(
       final GitVersion gitVersion,
@@ -53,7 +58,8 @@ public class AppConfigResolver implements DataFetcher<CompletableFuture<AppConfi
       final VisualConfiguration visualConfiguration,
       final TelemetryConfiguration telemetryConfiguration,
       final TestsConfiguration testsConfiguration,
-      final DatahubConfiguration datahubConfiguration) {
+      final DataHubConfiguration datahubConfiguration,
+      final ViewsConfiguration viewsConfiguration) {
     _gitVersion = gitVersion;
     _isAnalyticsEnabled = isAnalyticsEnabled;
     _ingestionConfiguration = ingestionConfiguration;
@@ -64,6 +70,7 @@ public class AppConfigResolver implements DataFetcher<CompletableFuture<AppConfi
     _telemetryConfiguration = telemetryConfiguration;
     _testsConfiguration = testsConfiguration;
     _datahubConfiguration = datahubConfiguration;
+    _viewsConfiguration = viewsConfiguration;
   }
 
   @Override
@@ -110,7 +117,18 @@ public class AppConfigResolver implements DataFetcher<CompletableFuture<AppConfi
     appConfig.setIdentityManagementConfig(identityManagementConfig);
     appConfig.setManagedIngestionConfig(ingestionConfig);
     appConfig.setAuthConfig(authConfig);
-    appConfig.setVisualConfig(_visualConfiguration);
+
+    final VisualConfig visualConfig = new VisualConfig();
+    if (_visualConfiguration != null && _visualConfiguration.getAssets() != null) {
+      visualConfig.setLogoUrl(_visualConfiguration.getAssets().getLogoUrl());
+      visualConfig.setFaviconUrl(_visualConfiguration.getAssets().getFaviconUrl());
+    }
+    if (_visualConfiguration != null && _visualConfiguration.getQueriesTab() != null) {
+      QueriesTabConfig queriesTabConfig = new QueriesTabConfig();
+      queriesTabConfig.setQueriesTabResultSize(_visualConfiguration.getQueriesTab().getQueriesTabResultSize());
+      visualConfig.setQueriesTab(queriesTabConfig);
+    }
+    appConfig.setVisualConfig(visualConfig);
 
     final TelemetryConfig telemetryConfig = new TelemetryConfig();
     telemetryConfig.setEnableThirdPartyLogging(_telemetryConfiguration.isEnableThirdPartyLogging());
@@ -119,6 +137,10 @@ public class AppConfigResolver implements DataFetcher<CompletableFuture<AppConfi
     final TestsConfig testsConfig = new TestsConfig();
     testsConfig.setEnabled(_testsConfiguration.isEnabled());
     appConfig.setTestsConfig(testsConfig);
+
+    final ViewsConfig viewsConfig = new ViewsConfig();
+    viewsConfig.setEnabled(_viewsConfiguration.isEnabled());
+    appConfig.setViewsConfig(viewsConfig);
 
     return CompletableFuture.completedFuture(appConfig);
   }
@@ -159,6 +181,8 @@ public class AppConfigResolver implements DataFetcher<CompletableFuture<AppConfi
       return EntityType.TAG;
     } else if (com.linkedin.metadata.authorization.PoliciesConfig.GLOSSARY_TERM_PRIVILEGES.getResourceType().equals(resourceType)) {
       return EntityType.GLOSSARY_TERM;
+    } else if (com.linkedin.metadata.authorization.PoliciesConfig.GLOSSARY_NODE_PRIVILEGES.getResourceType().equals(resourceType)) {
+      return EntityType.GLOSSARY_NODE;
     } else if (com.linkedin.metadata.authorization.PoliciesConfig.DOMAIN_PRIVILEGES.getResourceType().equals(resourceType)) {
       return EntityType.DOMAIN;
     } else if (com.linkedin.metadata.authorization.PoliciesConfig.CONTAINER_PRIVILEGES.getResourceType().equals(resourceType)) {

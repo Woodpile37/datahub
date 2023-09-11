@@ -1,18 +1,21 @@
 import datetime
-import itertools
+import functools
 import json
 import logging
-import shlex
+import os
 from json.decoder import JSONDecodeError
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from requests.exceptions import HTTPError, RequestException
 
+from datahub.cli.cli_utils import get_system_auth
 from datahub.configuration.common import ConfigurationError, OperationalError
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
+from datahub.emitter.request_helper import make_curl_command
 from datahub.emitter.serialization_helper import pre_json_transform
+from datahub.ingestion.api.closeable import Closeable
 from datahub.metadata.com.linkedin.pegasus2avro.mxe import (
     MetadataChangeEvent,
     MetadataChangeProposal,
@@ -22,24 +25,7 @@ from datahub.metadata.com.linkedin.pegasus2avro.usage import UsageAggregation
 logger = logging.getLogger(__name__)
 
 
-def _make_curl_command(
-    session: requests.Session, method: str, url: str, payload: str
-) -> str:
-    fragments: List[str] = [
-        "curl",
-        *itertools.chain(
-            *[
-                ("-X", method),
-                *[("-H", f"{k!s}: {v!s}") for (k, v) in session.headers.items()],
-                ("--data", payload),
-            ]
-        ),
-        url,
-    ]
-    return " ".join(shlex.quote(fragment) for fragment in fragments)
-
-
-class DataHubRestEmitter:
+class DataHubRestEmitter(Closeable):
     DEFAULT_CONNECT_TIMEOUT_SEC = 30  # 30 seconds should be plenty to connect
     DEFAULT_READ_TIMEOUT_SEC = (
         30  # Any ingest call taking longer than 30 seconds should be abandoned
@@ -51,7 +37,9 @@ class DataHubRestEmitter:
         504,
     ]
     DEFAULT_RETRY_METHODS = ["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"]
-    DEFAULT_RETRY_MAX_TIMES = 3
+    DEFAULT_RETRY_MAX_TIMES = int(
+        os.getenv("DATAHUB_REST_EMITTER_DEFAULT_RETRY_MAX_TIMES", "3")
+    )
 
     _gms_server: str
     _token: Optional[str]
@@ -91,6 +79,10 @@ class DataHubRestEmitter:
         )
         if token:
             self._session.headers.update({"Authorization": f"Bearer {token}"})
+        else:
+            system_auth = get_system_auth()
+            if system_auth is not None:
+                self._session.headers.update({"Authorization": system_auth})
 
         if extra_headers:
             self._session.headers.update(extra_headers)
@@ -143,6 +135,13 @@ class DataHubRestEmitter:
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
 
+        # Shim session.request to apply default timeout values.
+        # Via https://stackoverflow.com/a/59317604.
+        self._session.request = functools.partial(  # type: ignore
+            self._session.request,
+            timeout=(self._connect_timeout_sec, self._read_timeout_sec),
+        )
+
     def test_connection(self) -> dict:
         response = self._session.get(f"{self._gms_server}/config")
         if response.status_code == 200:
@@ -176,15 +175,29 @@ class DataHubRestEmitter:
             MetadataChangeProposalWrapper,
             UsageAggregation,
         ],
+        # NOTE: This signature should have the exception be optional rather than
+        #      required. However, this would be a breaking change that may need
+        #      more careful consideration.
+        callback: Optional[Callable[[Exception, str], None]] = None,
     ) -> Tuple[datetime.datetime, datetime.datetime]:
         start_time = datetime.datetime.now()
-        if isinstance(item, UsageAggregation):
-            self.emit_usage(item)
-        elif isinstance(item, (MetadataChangeProposal, MetadataChangeProposalWrapper)):
-            self.emit_mcp(item)
+        try:
+            if isinstance(item, UsageAggregation):
+                self.emit_usage(item)
+            elif isinstance(
+                item, (MetadataChangeProposal, MetadataChangeProposalWrapper)
+            ):
+                self.emit_mcp(item)
+            else:
+                self.emit_mce(item)
+        except Exception as e:
+            if callback:
+                callback(e, str(e))
+            raise
         else:
-            self.emit_mce(item)
-        return start_time, datetime.datetime.now()
+            if callback:
+                callback(None, "success")  # type: ignore
+            return start_time, datetime.datetime.now()
 
     def emit_mce(self, mce: MetadataChangeEvent) -> None:
         url = f"{self._gms_server}/entities?action=ingest"
@@ -233,18 +246,13 @@ class DataHubRestEmitter:
         self._emit_generic(url, payload)
 
     def _emit_generic(self, url: str, payload: str) -> None:
-        curl_command = _make_curl_command(self._session, "POST", url, payload)
+        curl_command = make_curl_command(self._session, "POST", url, payload)
         logger.debug(
             "Attempting to emit to DataHub GMS; using curl equivalent to:\n%s",
             curl_command,
         )
         try:
-            response = self._session.post(
-                url,
-                data=payload,
-                timeout=(self._connect_timeout_sec, self._read_timeout_sec),
-            )
-
+            response = self._session.post(url, data=payload)
             response.raise_for_status()
         except HTTPError as e:
             try:
@@ -261,6 +269,19 @@ class DataHubRestEmitter:
             raise OperationalError(
                 "Unable to emit metadata to DataHub GMS", {"message": str(e)}
             ) from e
+
+    def __repr__(self) -> str:
+        token_str = (
+            f" with token: {self._token[:4]}**********{self._token[-4:]}"
+            if self._token
+            else ""
+        )
+        return (
+            f"DataHubRestEmitter: configured to talk to {self._gms_server}{token_str}"
+        )
+
+    def close(self) -> None:
+        self._session.close()
 
 
 class DatahubRestEmitter(DataHubRestEmitter):

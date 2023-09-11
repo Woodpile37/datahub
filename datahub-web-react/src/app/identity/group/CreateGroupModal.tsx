@@ -2,15 +2,16 @@ import React, { useState } from 'react';
 import { message, Button, Input, Modal, Typography, Form, Collapse } from 'antd';
 import { useCreateGroupMutation } from '../../../graphql/group.generated';
 import { useEnterKeyListener } from '../../shared/useEnterKeyListener';
-import { groupIdTextValidation } from '../../shared/textUtil';
+import { validateCustomUrnId } from '../../shared/textUtil';
+import analytics, { EventType } from '../../analytics';
+import { CorpGroup, EntityType } from '../../../types.generated';
 
 type Props = {
-    visible: boolean;
     onClose: () => void;
-    onCreate: (name: string, description: string) => void;
+    onCreate: (group: CorpGroup) => void;
 };
 
-export default function CreateGroupModal({ visible, onClose, onCreate }: Props) {
+export default function CreateGroupModal({ onClose, onCreate }: Props) {
     const [stagedName, setStagedName] = useState('');
     const [stagedDescription, setStagedDescription] = useState('');
     const [stagedId, setStagedId] = useState<string | undefined>(undefined);
@@ -28,16 +29,31 @@ export default function CreateGroupModal({ visible, onClose, onCreate }: Props) 
                 },
             },
         })
+            .then(({ data, errors }) => {
+                if (!errors) {
+                    analytics.event({
+                        type: EventType.CreateGroupEvent,
+                    });
+                    message.success({
+                        content: `Created group!`,
+                        duration: 3,
+                    });
+                    // TODO: Get a full corp group back from create endpoint.
+                    onCreate({
+                        urn: data?.createGroup || '',
+                        type: EntityType.CorpGroup,
+                        name: stagedName,
+                        info: {
+                            description: stagedDescription,
+                        },
+                    });
+                }
+            })
             .catch((e) => {
                 message.destroy();
                 message.error({ content: `Failed to create group!: \n ${e.message || ''}`, duration: 3 });
             })
             .finally(() => {
-                message.success({
-                    content: `Created group!`,
-                    duration: 3,
-                });
-                onCreate(stagedName, stagedDescription);
                 setStagedName('');
                 setStagedDescription('');
             });
@@ -52,7 +68,7 @@ export default function CreateGroupModal({ visible, onClose, onCreate }: Props) 
     return (
         <Modal
             title="Create new group"
-            visible={visible}
+            visible
             onCancel={onClose}
             footer={
                 <>
@@ -80,7 +96,7 @@ export default function CreateGroupModal({ visible, onClose, onCreate }: Props) 
                         rules={[
                             {
                                 required: true,
-                                message: 'Enter a Domain name.',
+                                message: 'Enter a Group name.',
                             },
                             { whitespace: true },
                             { min: 1, max: 50 },
@@ -118,7 +134,7 @@ export default function CreateGroupModal({ visible, onClose, onCreate }: Props) 
                                 rules={[
                                     () => ({
                                         validator(_, value) {
-                                            if (value && groupIdTextValidation(value)) {
+                                            if (value && validateCustomUrnId(value)) {
                                                 return Promise.resolve();
                                             }
                                             return Promise.reject(new Error('Please enter correct Group name'));

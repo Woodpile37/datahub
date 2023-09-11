@@ -1,37 +1,60 @@
 import React, { useState, useEffect } from 'react';
-import { message, Button } from 'antd';
-import { CheckOutlined } from '@ant-design/icons';
-
+import { message } from 'antd';
+import styled from 'styled-components';
 import analytics, { EventType, EntityActionType } from '../../../../../analytics';
-
-import StyledMDEditor from '../../../components/styled/StyledMDEditor';
-import TabToolbar from '../../../components/styled/TabToolbar';
-
 import { GenericEntityUpdate } from '../../../types';
-import { useEntityData, useEntityUpdate, useRefetch } from '../../../EntityContext';
+import { useEntityData, useEntityUpdate, useMutationUrn, useRefetch } from '../../../EntityContext';
 import { useUpdateDescriptionMutation } from '../../../../../../graphql/mutations.generated';
 import { DiscardDescriptionModal } from './DiscardDescriptionModal';
 import { EDITED_DESCRIPTIONS_CACHE_NAME } from '../../../utils';
+import { DescriptionEditorToolbar } from './DescriptionEditorToolbar';
+import { Editor } from './editor/Editor';
 
-export const DescriptionEditor = ({ onComplete }: { onComplete?: () => void }) => {
-    const { urn, entityType, entityData } = useEntityData();
+const EditorContainer = styled.div`
+    overflow: auto;
+    height: 100%;
+`;
+
+type DescriptionEditorProps = {
+    onComplete?: () => void;
+};
+
+export const DescriptionEditor = ({ onComplete }: DescriptionEditorProps) => {
+    const mutationUrn = useMutationUrn();
+    const { entityType, entityData } = useEntityData();
     const refetch = useRefetch();
     const updateEntity = useEntityUpdate<GenericEntityUpdate>();
     const [updateDescriptionMutation] = useUpdateDescriptionMutation();
 
     const localStorageDictionary = localStorage.getItem(EDITED_DESCRIPTIONS_CACHE_NAME);
     const editedDescriptions = (localStorageDictionary && JSON.parse(localStorageDictionary)) || {};
-    const description = editedDescriptions.hasOwnProperty(urn)
-        ? editedDescriptions[urn]
+    const description = editedDescriptions.hasOwnProperty(mutationUrn)
+        ? editedDescriptions[mutationUrn]
         : entityData?.editableProperties?.description || entityData?.properties?.description || '';
 
     const [updatedDescription, setUpdatedDescription] = useState(description);
-    const [isDescriptionUpdated, setIsDescriptionUpdated] = useState(editedDescriptions.hasOwnProperty(urn));
-    const [cancelModalVisible, setCancelModalVisible] = useState(false);
+    const [isDescriptionUpdated, setIsDescriptionUpdated] = useState(editedDescriptions.hasOwnProperty(mutationUrn));
+    const [confirmCloseModalVisible, setConfirmCloseModalVisible] = useState(false);
+
+    /**
+     * Auto-Save the description edits to local storage every 5 seconds.
+     */
+    useEffect(() => {
+        let delayDebounceFn: ReturnType<typeof setTimeout>;
+        const editedDescriptionsLocal = (localStorageDictionary && JSON.parse(localStorageDictionary)) || {};
+
+        if (isDescriptionUpdated) {
+            delayDebounceFn = setTimeout(() => {
+                editedDescriptionsLocal[mutationUrn] = updatedDescription;
+                localStorage.setItem(EDITED_DESCRIPTIONS_CACHE_NAME, JSON.stringify(editedDescriptionsLocal));
+            }, 5000);
+        }
+        return () => clearTimeout(delayDebounceFn);
+    }, [mutationUrn, isDescriptionUpdated, updatedDescription, localStorageDictionary]);
 
     const updateDescriptionLegacy = () => {
         return updateEntity?.({
-            variables: { urn, input: { editableProperties: { description: updatedDescription || '' } } },
+            variables: { urn: mutationUrn, input: { editableProperties: { description: updatedDescription || '' } } },
         });
     };
 
@@ -40,13 +63,13 @@ export const DescriptionEditor = ({ onComplete }: { onComplete?: () => void }) =
             variables: {
                 input: {
                     description: updatedDescription,
-                    resourceUrn: urn,
+                    resourceUrn: mutationUrn,
                 },
             },
         });
     };
 
-    const handleSaveDescription = async () => {
+    const handleSave = async () => {
         message.loading({ content: 'Saving...' });
         try {
             if (updateEntity) {
@@ -61,11 +84,11 @@ export const DescriptionEditor = ({ onComplete }: { onComplete?: () => void }) =
                 type: EventType.EntityActionEvent,
                 actionType: EntityActionType.UpdateDescription,
                 entityType,
-                entityUrn: urn,
+                entityUrn: mutationUrn,
             });
             message.success({ content: 'Description Updated', duration: 2 });
             // Updating the localStorage after save
-            delete editedDescriptions[urn];
+            delete editedDescriptions[mutationUrn];
             if (Object.keys(editedDescriptions).length === 0) {
                 localStorage.removeItem(EDITED_DESCRIPTIONS_CACHE_NAME);
             } else {
@@ -91,33 +114,15 @@ export const DescriptionEditor = ({ onComplete }: { onComplete?: () => void }) =
         }
     };
 
-    // Updating the localStorage when the user has paused for 5 sec
-    useEffect(() => {
-        let delayDebounceFn: ReturnType<typeof setTimeout>;
-        const editedDescriptionsLocal = (localStorageDictionary && JSON.parse(localStorageDictionary)) || {};
-
-        if (isDescriptionUpdated) {
-            delayDebounceFn = setTimeout(() => {
-                editedDescriptionsLocal[urn] = updatedDescription;
-                localStorage.setItem(EDITED_DESCRIPTIONS_CACHE_NAME, JSON.stringify(editedDescriptionsLocal));
-            }, 5000);
-        }
-        return () => clearTimeout(delayDebounceFn);
-    }, [urn, isDescriptionUpdated, updatedDescription, localStorageDictionary]);
-
     // Handling the Discard Modal
-    const showModal = () => {
-        if (isDescriptionUpdated) {
-            setCancelModalVisible(true);
+    const handleConfirmClose = (showConfirm: boolean | undefined = true) => {
+        if (showConfirm && isDescriptionUpdated) {
+            setConfirmCloseModalVisible(true);
         } else if (onComplete) onComplete();
     };
 
-    function onCancel() {
-        setCancelModalVisible(false);
-    }
-
-    const onDiscard = () => {
-        delete editedDescriptions[urn];
+    const handleCloseWithoutSaving = () => {
+        delete editedDescriptions[mutationUrn];
         if (Object.keys(editedDescriptions).length === 0) {
             localStorage.removeItem(EDITED_DESCRIPTIONS_CACHE_NAME);
         } else {
@@ -128,25 +133,19 @@ export const DescriptionEditor = ({ onComplete }: { onComplete?: () => void }) =
 
     return entityData ? (
         <>
-            <TabToolbar>
-                <Button type="text" onClick={showModal}>
-                    Back
-                </Button>
-                <Button onClick={handleSaveDescription} disabled={!isDescriptionUpdated}>
-                    <CheckOutlined /> Save
-                </Button>
-            </TabToolbar>
-            <StyledMDEditor
-                value={description}
-                onChange={(v) => handleEditorChange(v || '')}
-                preview="live"
-                visiableDragbar={false}
+            <DescriptionEditorToolbar
+                onSave={handleSave}
+                onClose={handleConfirmClose}
+                disableSave={!isDescriptionUpdated}
             />
-            {cancelModalVisible && (
+            <EditorContainer>
+                <Editor content={updatedDescription} onChange={handleEditorChange} />
+            </EditorContainer>
+            {confirmCloseModalVisible && (
                 <DiscardDescriptionModal
-                    cancelModalVisible={cancelModalVisible}
-                    onDiscard={onDiscard}
-                    onCancel={onCancel}
+                    cancelModalVisible={confirmCloseModalVisible}
+                    onDiscard={handleCloseWithoutSaving}
+                    onCancel={() => setConfirmCloseModalVisible(false)}
                 />
             )}
         </>

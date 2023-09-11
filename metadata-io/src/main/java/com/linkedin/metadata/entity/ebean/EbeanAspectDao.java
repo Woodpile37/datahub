@@ -6,9 +6,10 @@ import com.linkedin.common.AuditStamp;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.metadata.entity.AspectDao;
 import com.linkedin.metadata.entity.AspectMigrationsDao;
-import com.linkedin.metadata.entity.ListResult;
 import com.linkedin.metadata.entity.EntityAspect;
 import com.linkedin.metadata.entity.EntityAspectIdentifier;
+import com.linkedin.metadata.entity.ListResult;
+import com.linkedin.metadata.entity.restoreindices.RestoreIndicesArgs;
 import com.linkedin.metadata.query.ExtraInfo;
 import com.linkedin.metadata.query.ExtraInfoArray;
 import com.linkedin.metadata.query.ListResultMetadata;
@@ -24,12 +25,6 @@ import io.ebean.RawSqlBuilder;
 import io.ebean.Transaction;
 import io.ebean.TxScope;
 import io.ebean.annotation.TxIsolation;
-import lombok.extern.slf4j.Slf4j;
-
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-import javax.persistence.RollbackException;
-import javax.persistence.Table;
 import java.net.URISyntaxException;
 import java.sql.Timestamp;
 import java.time.Clock;
@@ -41,6 +36,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import javax.persistence.RollbackException;
+import javax.persistence.Table;
+import lombok.extern.slf4j.Slf4j;
 
 import static com.linkedin.metadata.Constants.ASPECT_LATEST_VERSION;
 
@@ -233,7 +233,6 @@ public class EbeanAspectDao implements AspectDao, AspectMigrationsDao {
   }
 
   @Override
-  @Nullable
   public void deleteAspect(@Nonnull final EntityAspect aspect) {
     validateConnection();
     EbeanAspectV2 ebeanAspect = EbeanAspectV2.fromEntityAspect(aspect);
@@ -241,7 +240,6 @@ public class EbeanAspectDao implements AspectDao, AspectMigrationsDao {
   }
 
   @Override
-  @Nullable
   public int deleteUrn(@Nonnull final String urn) {
     validateConnection();
     return _server.createQuery(EbeanAspectV2.class).where().eq(EbeanAspectV2.URN_COLUMN, urn).delete();
@@ -310,7 +308,7 @@ public class EbeanAspectDao implements AspectDao, AspectMigrationsDao {
     outputParamsToValues.put(aspectArg, aspect);
     outputParamsToValues.put(versionArg, version);
 
-    return String.format("SELECT urn, aspect, version, metadata, createdOn, createdBy, createdFor "
+    return String.format("SELECT urn, aspect, version, metadata, systemMetadata, createdOn, createdBy, createdFor "
             + "FROM %s WHERE urn = :%s AND aspect = :%s AND version = :%s",
         EbeanAspectV2.class.getAnnotation(Table.class).name(), urnArg, aspectArg, versionArg);
   }
@@ -392,6 +390,46 @@ public class EbeanAspectDao implements AspectDao, AspectMigrationsDao {
         .collect(Collectors.toList());
 
     return toListResult(urns, null, pagedList, start);
+  }
+
+  @Nonnull
+  @Override
+  public Integer countAspect(@Nonnull String aspectName, @Nullable String urnLike) {
+    ExpressionList<EbeanAspectV2> exp = _server.find(EbeanAspectV2.class)
+            .select(EbeanAspectV2.KEY_ID)
+            .where()
+            .eq(EbeanAspectV2.VERSION_COLUMN, ASPECT_LATEST_VERSION)
+            .eq(EbeanAspectV2.ASPECT_COLUMN, aspectName);
+
+    if (urnLike != null) {
+      exp = exp.like(EbeanAspectV2.URN_COLUMN, urnLike);
+    }
+    return exp.findCount();
+  }
+
+  @Nonnull
+  @Override
+  public PagedList<EbeanAspectV2> getPagedAspects(final RestoreIndicesArgs args) {
+    ExpressionList<EbeanAspectV2> exp = _server.find(EbeanAspectV2.class)
+            .select(EbeanAspectV2.ALL_COLUMNS)
+            .where()
+            .eq(EbeanAspectV2.VERSION_COLUMN, ASPECT_LATEST_VERSION);
+    if (args.aspectName != null) {
+      exp = exp.eq(EbeanAspectV2.ASPECT_COLUMN, args.aspectName);
+    }
+    if (args.urn != null) {
+      exp = exp.eq(EbeanAspectV2.URN_COLUMN, args.urn);
+    }
+    if (args.urnLike != null) {
+      exp = exp.like(EbeanAspectV2.URN_COLUMN, args.urnLike);
+    }
+    return  exp.orderBy()
+            .asc(EbeanAspectV2.URN_COLUMN)
+            .orderBy()
+            .asc(EbeanAspectV2.ASPECT_COLUMN)
+            .setFirstRow(args.start)
+            .setMaxRows(args.batchSize)
+            .findPagedList();
   }
 
   @Override

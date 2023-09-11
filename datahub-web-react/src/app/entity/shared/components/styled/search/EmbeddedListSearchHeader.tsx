@@ -5,23 +5,30 @@ import styled from 'styled-components';
 import TabToolbar from '../TabToolbar';
 import { SearchBar } from '../../../../../search/SearchBar';
 import { useEntityRegistry } from '../../../../../useEntityRegistry';
-import { EntityType, FacetFilterInput, SearchAcrossEntitiesInput } from '../../../../../../types.generated';
-import { SearchResultsInterface } from './types';
+import {
+    EntityType,
+    AndFilterInput,
+    ScrollAcrossEntitiesInput,
+    ScrollResults,
+} from '../../../../../../types.generated';
 import SearchExtendedMenu from './SearchExtendedMenu';
+import { SearchSelectBar } from './SearchSelectBar';
+import { EntityAndType } from '../../../types';
 
 const HeaderContainer = styled.div`
     display: flex;
     justify-content: space-between;
-    padding-bottom: 16px;
     width: 100%;
+    padding-right: 4px;
+    padding-left: 4px;
 `;
 
 const SearchAndDownloadContainer = styled.div`
     display: flex;
+    align-items: center;
 `;
 
 const SearchMenuContainer = styled.div`
-    margin-top: 7px;
     margin-left: 10px;
 `;
 
@@ -29,68 +36,97 @@ type Props = {
     onSearch: (q: string) => void;
     onToggleFilters: () => void;
     placeholderText?: string | null;
-    showDownloadCsvButton?: boolean;
     callSearchOnVariables: (variables: {
-        input: SearchAcrossEntitiesInput;
-    }) => Promise<SearchResultsInterface | null | undefined>;
+        input: ScrollAcrossEntitiesInput;
+    }) => Promise<ScrollResults | null | undefined>;
     entityFilters: EntityType[];
-    filters: FacetFilterInput[];
+    filters: AndFilterInput[];
     query: string;
+    isSelectMode: boolean;
+    isSelectAll: boolean;
+    selectedEntities: EntityAndType[];
+    setIsSelectMode: (showSelectMode: boolean) => any;
+    onChangeSelectAll: (selected: boolean) => void;
+    refetch?: () => void;
+    searchBarStyle?: any;
+    searchBarInputStyle?: any;
 };
 
 export default function EmbeddedListSearchHeader({
     onSearch,
     onToggleFilters,
     placeholderText,
-    showDownloadCsvButton,
     callSearchOnVariables,
     entityFilters,
     filters,
     query,
+    isSelectMode,
+    isSelectAll,
+    selectedEntities,
+    setIsSelectMode,
+    onChangeSelectAll,
+    refetch,
+    searchBarStyle,
+    searchBarInputStyle,
 }: Props) {
     const entityRegistry = useEntityRegistry();
 
-    const onQueryChange = (newQuery: string) => {
-        onSearch(newQuery);
-    };
-
     return (
-        <TabToolbar>
-            <HeaderContainer>
-                <Button type="text" onClick={onToggleFilters}>
-                    <FilterOutlined />
-                    <Typography.Text>Filters</Typography.Text>
-                </Button>
-                <SearchAndDownloadContainer>
-                    <SearchBar
-                        initialQuery=""
-                        placeholderText={placeholderText || 'Search entities...'}
-                        suggestions={[]}
-                        style={{
-                            maxWidth: 220,
-                            padding: 0,
-                        }}
-                        inputStyle={{
-                            height: 32,
-                            fontSize: 12,
-                        }}
-                        onSearch={onSearch}
-                        onQueryChange={onQueryChange}
-                        entityRegistry={entityRegistry}
-                    />
-                    {/* TODO: in the future, when we add more menu items, we'll show this always */}
-                    {showDownloadCsvButton && (
+        <>
+            <TabToolbar>
+                <HeaderContainer>
+                    <Button type="text" onClick={onToggleFilters}>
+                        <FilterOutlined />
+                        <Typography.Text>Filters</Typography.Text>
+                    </Button>
+                    <SearchAndDownloadContainer>
+                        <SearchBar
+                            data-testid="embedded-search-bar"
+                            initialQuery=""
+                            placeholderText={placeholderText || 'Search entities...'}
+                            suggestions={[]}
+                            style={
+                                searchBarStyle || {
+                                    maxWidth: 220,
+                                    padding: 0,
+                                }
+                            }
+                            inputStyle={
+                                searchBarInputStyle || {
+                                    height: 32,
+                                    fontSize: 12,
+                                }
+                            }
+                            onSearch={onSearch}
+                            onQueryChange={onSearch}
+                            entityRegistry={entityRegistry}
+                            hideRecommendations
+                        />
                         <SearchMenuContainer>
                             <SearchExtendedMenu
                                 callSearchOnVariables={callSearchOnVariables}
                                 entityFilters={entityFilters}
                                 filters={filters}
                                 query={query}
+                                setShowSelectMode={setIsSelectMode}
                             />
                         </SearchMenuContainer>
-                    )}
-                </SearchAndDownloadContainer>
-            </HeaderContainer>
-        </TabToolbar>
+                    </SearchAndDownloadContainer>
+                </HeaderContainer>
+            </TabToolbar>
+            {isSelectMode && (
+                <TabToolbar>
+                    <SearchSelectBar
+                        isSelectAll={isSelectAll}
+                        onChangeSelectAll={onChangeSelectAll}
+                        selectedEntities={selectedEntities}
+                        onCancel={() => {
+                            setIsSelectMode(false);
+                        }}
+                        refetch={refetch}
+                    />
+                </TabToolbar>
+            )}
+        </>
     );
 }

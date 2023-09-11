@@ -19,6 +19,10 @@ export enum PreviewType {
      * A tiny search preview for text-box search.
      */
     MINI_SEARCH,
+    /**
+     * Previews rendered when hovering over the entity in a compact list
+     */
+    HOVER_CARD,
 }
 
 export enum IconStyleType {
@@ -41,6 +45,40 @@ export enum IconStyleType {
 }
 
 /**
+ * A standard set of Entity Capabilities that span across entity types.
+ */
+export enum EntityCapabilityType {
+    /**
+     * Ownership of an entity
+     */
+    OWNERS,
+    /**
+     * Adding a glossary term to the entity
+     */
+    GLOSSARY_TERMS,
+    /**
+     * Adding a tag to an entity
+     */
+    TAGS,
+    /**
+     * Assigning the entity to a domain
+     */
+    DOMAINS,
+    /**
+     * Deprecating an entity
+     */
+    DEPRECATION,
+    /**
+     * Soft deleting an entity
+     */
+    SOFT_DELETE,
+    /**
+     * Assigning a role to an entity. Currently only supported for users.
+     */
+    ROLES,
+}
+
+/**
  * Base interface used for authoring DataHub Entities on the client side.
  *
  * <T> the generated GraphQL data type associated with the entity.
@@ -55,7 +93,7 @@ export interface Entity<T> {
      * Ant-design icon associated with the Entity. For a list of all candidate icons, see
      * https://ant.design/components/icon/
      */
-    icon: (fontSize: number, styleType: IconStyleType) => JSX.Element;
+    icon: (fontSize: number, styleType: IconStyleType, color?: string) => JSX.Element;
 
     /**
      * Returns whether the entity search is enabled
@@ -124,4 +162,14 @@ export interface Entity<T> {
      * Returns generic entity properties for the entity
      */
     getGenericEntityProperties: (data: T) => GenericEntityProperties | null;
+
+    /**
+     * Returns the supported features for the entity
+     */
+    supportedCapabilities: () => Set<EntityCapabilityType>;
+
+    /**
+     * Returns the profile component to be displayed in our Chrome extension
+     */
+    renderEmbeddedProfile?: (urn: string) => JSX.Element;
 }
