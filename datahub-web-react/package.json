@@ -73,7 +73,7 @@
         "react-js-cron": "^2.1.0",
         "react-router": "^5.2.0",
         "react-router-dom": "^5.1.6",
-        "react-scripts": "4.0.3",
+        "react-scripts": "5.0.0",
         "react-syntax-highlighter": "^15.4.4",
         "react-visibility-sensor": "^5.1.1",
         "reactour": "1.18.7",
@@ -122,7 +122,7 @@
         ]
     },
     "devDependencies": {
-        "@graphql-codegen/cli": "1.20.0",
+        "@graphql-codegen/cli": "2.0.0",
         "@graphql-codegen/near-operation-file-preset": "^1.17.13",
         "@graphql-codegen/typescript-operations": "1.17.13",
         "@graphql-codegen/typescript-react-apollo": "2.2.1",
